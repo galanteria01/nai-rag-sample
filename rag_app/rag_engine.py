@@ -16,6 +16,7 @@ from openai import OpenAI
 from .embedding_service import EmbeddingService
 from .vector_store import VectorStore, Document
 from .document_processor import DocumentProcessor
+from .mcp_tools import MCPToolsManager, ToolResult
 
 
 class RAGEngine:
@@ -38,7 +39,9 @@ class RAGEngine:
         custom_headers: Optional[Dict[str, str]] = None,
         timeout: float = 60.0,
         auto_persist: bool = True,
-        persist_path: str = "vector_store"
+        persist_path: str = "vector_store",
+        enable_mcp_tools: bool = False,
+        mcp_tools_config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize the RAG engine.
@@ -57,6 +60,8 @@ class RAGEngine:
             timeout: Request timeout in seconds
             auto_persist: Whether to automatically save vector store when documents are added
             persist_path: Path to save/load vector store
+            enable_mcp_tools: Whether to enable MCP tools for enhanced chat
+            mcp_tools_config: Configuration for MCP tools
         """
         self.embedding_service = embedding_service
         self.vector_store = vector_store
@@ -94,6 +99,14 @@ class RAGEngine:
         # Chat history for conversation context
         self.chat_history: List[Dict[str, str]] = []
         
+        # MCP Tools configuration
+        self.enable_mcp_tools = enable_mcp_tools
+        self.mcp_tools_manager = None
+        
+        if self.enable_mcp_tools:
+            enabled_tools = mcp_tools_config.get("enabled_tools") if mcp_tools_config else None
+            self.mcp_tools_manager = MCPToolsManager(enabled_tools=enabled_tools)
+        
         # System prompt for the RAG assistant
         self.system_prompt = """You are a helpful AI assistant that answers questions based on the provided context documents. 
 
@@ -108,6 +121,22 @@ Context Documents:
 {context}
 
 Please answer the following question based on the context above."""
+        
+        # System prompt for MCP tools mode
+        self.tools_system_prompt = """You are a helpful AI assistant with access to various tools to enhance your capabilities. 
+When the user asks questions or requests help, you should actively use the available tools to provide better assistance.
+
+Available tools:
+{tools_description}
+
+IMPORTANT: Use tools proactively when they would be helpful. For example:
+- Use get_runtime_logs when user asks about logs, application status, or debugging
+- Use web_search when user asks about current events or real-time information
+- Use read_file when user asks about file contents or specific files
+- Use runtime_errors when user asks about errors or problems
+- Use memory tools when user wants to save or recall information
+
+Always call the appropriate tool first, then provide a comprehensive response based on the tool results."""
     
     def test_connection(self) -> Dict[str, Any]:
         """
@@ -415,6 +444,293 @@ Please answer the following question based on the context above."""
                 "endpoint_type": self._detect_endpoint_type()
             }
     
+    def chat_with_tools(
+        self, 
+        message: str, 
+        use_chat_history: bool = True,
+        max_tokens: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Chat with the assistant using MCP tools.
+        
+        Args:
+            message: User message
+            use_chat_history: Whether to use chat history for context
+            max_tokens: Maximum tokens for response
+            
+        Returns:
+            Dictionary with response and tool usage metadata
+        """
+        if not self.enable_mcp_tools or not self.mcp_tools_manager:
+            return self.chat(message, include_context=False, use_chat_history=use_chat_history, max_tokens=max_tokens)
+        
+        if max_tokens is None:
+            max_tokens = 1000
+        
+        # Get tools descriptions for system prompt
+        tools_descriptions = self.mcp_tools_manager.get_tool_descriptions()
+        tools_description = "\n".join([f"- {name}: {desc}" for name, desc in tools_descriptions.items()])
+        
+        # Build system message with tools
+        system_message = self.tools_system_prompt.format(tools_description=tools_description)
+        
+        # Prepare messages for chat completion
+        messages = [{"role": "system", "content": system_message}]
+        
+        # Add chat history if enabled
+        if use_chat_history:
+            messages.extend(self.chat_history)
+        
+        # Add current message
+        messages.append({"role": "user", "content": message})
+        
+        # Truncate messages if they exceed context limit
+        messages = self._truncate_messages(messages)
+        
+        # Get tools for function calling
+        tools = self.mcp_tools_manager.get_tools_for_openai()
+        
+        try:
+            # Generate response with tools
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice="auto"
+            )
+            
+            message_obj = response.choices[0].message
+            assistant_message = message_obj.content or ""
+            
+            # Handle tool calls
+            tool_results = []
+            if message_obj.tool_calls:
+                # Process tool calls
+                tool_results = self.mcp_tools_manager.process_tool_calls(
+                    [{"type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} 
+                     for tc in message_obj.tool_calls]
+                )
+                
+                # Add tool results to messages for follow-up
+                for tool_call, tool_result in zip(message_obj.tool_calls, tool_results):
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{"id": tool_call.id, "type": "function", "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments}}]
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "content": str(tool_result.result if tool_result.success else tool_result.error),
+                        "tool_call_id": tool_call.id
+                    })
+                
+                # Get final response after tool execution
+                final_response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=max_tokens
+                )
+                
+                final_message = final_response.choices[0].message.content
+                assistant_message = final_message or assistant_message
+            
+            # Update chat history
+            if use_chat_history:
+                self.chat_history.append({"role": "user", "content": message})
+                self.chat_history.append({"role": "assistant", "content": assistant_message})
+                
+                # Keep chat history manageable
+                if len(self.chat_history) > 20:
+                    self.chat_history = self.chat_history[-20:]
+            
+            return {
+                "response": assistant_message,
+                "tool_calls": [{"name": tr.name, "arguments": {}, "result": tr.result, "success": tr.success} for tr in tool_results],
+                "tools_used": len(tool_results) > 0,
+                "model_used": self.model_name,
+                "timestamp": datetime.now().isoformat(),
+                "endpoint_type": self._detect_endpoint_type()
+            }
+            
+        except Exception as e:
+            return {
+                "response": f"Error generating response: {str(e)}",
+                "tool_calls": [],
+                "tools_used": False,
+                "model_used": self.model_name,
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e),
+                "endpoint_type": self._detect_endpoint_type()
+            }
+    
+    def chat_with_tools_stream(
+        self, 
+        message: str, 
+        use_chat_history: bool = True,
+        max_tokens: Optional[int] = None
+    ):
+        """
+        Chat with the assistant using MCP tools with streaming responses.
+        
+        Args:
+            message: User message
+            use_chat_history: Whether to use chat history for context
+            max_tokens: Maximum tokens for response
+            
+        Yields:
+            Stream of response chunks and tool usage information
+        """
+        if not self.enable_mcp_tools or not self.mcp_tools_manager:
+            yield from self.chat_stream(message, include_context=False, use_chat_history=use_chat_history, max_tokens=max_tokens)
+            return
+        
+        if max_tokens is None:
+            max_tokens = 1000
+        
+        # Get tools descriptions for system prompt
+        tools_descriptions = self.mcp_tools_manager.get_tool_descriptions()
+        tools_description = "\n".join([f"- {name}: {desc}" for name, desc in tools_descriptions.items()])
+        
+        # Build system message with tools
+        system_message = self.tools_system_prompt.format(tools_description=tools_description)
+        
+        # Prepare messages for chat completion
+        messages = [{"role": "system", "content": system_message}]
+        
+        # Add chat history if enabled
+        if use_chat_history:
+            messages.extend(self.chat_history)
+        
+        # Add current message
+        messages.append({"role": "user", "content": message})
+        
+        # Truncate messages if they exceed context limit
+        messages = self._truncate_messages(messages)
+        
+        # Get tools for function calling
+        tools = self.mcp_tools_manager.get_tools_for_openai()
+        
+        full_response = ""
+        
+        try:
+            # Generate response with tools
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice="auto",
+                stream=True
+            )
+            
+            # Collect streaming response and tool calls
+            tool_calls_dict = {}  # Track tool calls by index
+            content_buffer = ""
+            
+            for chunk in stream:
+                delta = chunk.choices[0].delta
+                
+                # Handle content
+                if delta.content is not None:
+                    content = delta.content
+                    content_buffer += content
+                    yield content
+                
+                # Handle tool calls
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        tc_index = tc_delta.index
+                        
+                        # Initialize tool call if not exists
+                        if tc_index not in tool_calls_dict:
+                            tool_calls_dict[tc_index] = {
+                                "id": tc_delta.id,
+                                "type": "function",
+                                "function": {
+                                    "name": "",
+                                    "arguments": ""
+                                }
+                            }
+                        
+                        # Update tool call with delta
+                        if tc_delta.id:
+                            tool_calls_dict[tc_index]["id"] = tc_delta.id
+                        
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_dict[tc_index]["function"]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_dict[tc_index]["function"]["arguments"] += tc_delta.function.arguments
+            
+            # Process tool calls if any
+            if tool_calls_dict:
+                yield "\n\n🔧 **Using tools to enhance response...**\n\n"
+                
+                # Convert tool calls dict to list
+                tool_calls = [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())]
+                
+                # Process tool calls
+                tool_results = self.mcp_tools_manager.process_tool_calls(tool_calls)
+                
+                # Show tool results
+                for tool_result in tool_results:
+                    if tool_result.success:
+                        yield f"🔧 **{tool_result.name}**: {str(tool_result.result)}\n\n"
+                    else:
+                        yield f"❌ **{tool_result.name}**: Error - {tool_result.error}\n\n"
+                
+                # Add tool results to messages for follow-up
+                messages.append({
+                    "role": "assistant",
+                    "content": content_buffer if content_buffer else None,
+                    "tool_calls": tool_calls
+                })
+                
+                for tool_call, tool_result in zip(tool_calls, tool_results):
+                    messages.append({
+                        "role": "tool",
+                        "content": str(tool_result.result if tool_result.success else tool_result.error),
+                        "tool_call_id": tool_call["id"]
+                    })
+                
+                # Get final response after tool execution
+                yield "\n**Final response:**\n"
+                final_stream = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=max_tokens,
+                    stream=True
+                )
+                
+                final_response = ""
+                for chunk in final_stream:
+                    if chunk.choices[0].delta.content is not None:
+                        content = chunk.choices[0].delta.content
+                        final_response += content
+                        yield content
+                
+                full_response = final_response
+            else:
+                # No tool calls, use the content buffer
+                full_response = content_buffer
+            
+            # Update chat history
+            if use_chat_history:
+                self.chat_history.append({"role": "user", "content": message})
+                self.chat_history.append({"role": "assistant", "content": full_response})
+                
+                # Keep chat history manageable
+                if len(self.chat_history) > 20:
+                    self.chat_history = self.chat_history[-20:]
+                    
+        except Exception as e:
+            yield f"Error generating response: {str(e)}"
+    
     def chat_stream(
         self, 
         message: str, 
@@ -599,7 +915,7 @@ Please answer the following question based on the context above."""
         Returns:
             Dictionary with statistics
         """
-        return {
+        stats = {
             "model_name": self.model_name,
             "temperature": self.temperature,
             "max_context_tokens": self.max_context_tokens,
@@ -611,8 +927,17 @@ Please answer the following question based on the context above."""
             "timeout": self.timeout,
             "vector_store_stats": self.vector_store.get_stats(),
             "embedding_service_info": self.embedding_service.get_model_info(),
-            "document_processor_stats": self.document_processor.get_processing_stats()
+            "document_processor_stats": self.document_processor.get_processing_stats(),
+            "mcp_tools_enabled": self.enable_mcp_tools
         }
+        
+        if self.enable_mcp_tools and self.mcp_tools_manager:
+            stats["mcp_tools_stats"] = {
+                "available_tools": self.mcp_tools_manager.get_available_tools(),
+                "tools_descriptions": self.mcp_tools_manager.get_tool_descriptions()
+            }
+        
+        return stats
     
     def save_knowledge_base(self, filepath: str):
         """
@@ -727,6 +1052,8 @@ Please answer the following question based on the context above."""
         embedding_model: str,
         chat_model: str,
         embedding_dimension: int,
+        enable_mcp_tools: bool = False,
+        mcp_tools_config: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> "RAGEngine":
         """
@@ -738,6 +1065,8 @@ Please answer the following question based on the context above."""
             embedding_model: Name of the embedding model
             chat_model: Name of the chat model
             embedding_dimension: Dimension of embeddings
+            enable_mcp_tools: Whether to enable MCP tools for enhanced chat
+            mcp_tools_config: Configuration for MCP tools
             **kwargs: Additional arguments for RAG engine
             
         Returns:
@@ -779,6 +1108,8 @@ Please answer the following question based on the context above."""
             base_url=base_url,
             model_name=chat_model,
             persist_path=persist_path,
+            enable_mcp_tools=enable_mcp_tools,
+            mcp_tools_config=mcp_tools_config,
             **{k: v for k, v in kwargs.items() if k not in ['persist_path', 'index_type', 'chunk_size', 'chunk_overlap', 'chunking_strategy']}
         )
     

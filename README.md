@@ -37,6 +37,7 @@ This RAG application enables organizations to:
 | **Metadata Filtering** | Advanced document filtering and categorization |
 | **Streaming Responses** | Real-time response generation |
 | **Persistence** | Save and load knowledge bases |
+| **MCP Tools Integration** | Enhanced chat with web search, file ops, runtime logs, memory |
 | **Enterprise Integration** | RESTful APIs for custom integrations |
 
 ## 🏗️ Architecture
@@ -194,6 +195,41 @@ rag = RAGEngine.create_custom(
     embedding_model="nomic-embed-text",
     chat_model="llama2:7b"
 )
+```
+
+## 🔧 MCP Tools Integration
+
+When RAG is disabled, the system can be enhanced with MCP (Model Context Protocol) tools for advanced chat capabilities:
+
+### Available Tools
+- **🌐 Web Search**: Real-time web information lookup
+- **📊 Runtime Logs**: Application monitoring and debugging
+- **🐛 Runtime Errors**: Error tracking and analysis
+- **📁 File Operations**: Read and write files safely
+- **💻 Code Execution**: Execute code snippets (placeholder)
+- **🧠 Memory Management**: Save and retrieve information
+
+### Usage in Streamlit App
+1. Disable RAG mode in the sidebar
+2. Enable MCP Tools in the sidebar
+3. Select desired tools
+4. Chat with enhanced AI capabilities
+
+### Programmatic Usage
+```python
+# Create RAG engine with MCP tools
+rag = RAGEngine.create_for_nutanix(
+    api_key="your-key",
+    base_url="https://your-cluster.com/v1",
+    embedding_model="embedcpu",
+    chat_model="llama-3-3-70b",
+    embedding_dimension=384,
+    enable_mcp_tools=True,
+    mcp_tools_config={"enabled_tools": ["web_search", "file_operations"]}
+)
+
+# Chat with tools (when RAG is disabled)
+response = rag.chat_with_tools("What's the latest news about AI?")
 ```
 
 ## 🎛️ Configuration Options

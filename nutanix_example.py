@@ -98,6 +98,8 @@ def initialize_session_state():
         st.session_state.rag_enabled = True
     if 'knowledge_base_loaded' not in st.session_state:
         st.session_state.knowledge_base_loaded = False
+    if 'mcp_tools_enabled' not in st.session_state:
+        st.session_state.mcp_tools_enabled = False
 
 def sidebar_configuration():
     """Create the sidebar configuration panel."""
@@ -229,12 +231,54 @@ def sidebar_configuration():
             ["flat", "ivf", "hnsw"],
             help="Type of vector index for similarity search"
         )
+        
+        # Default MCP tools settings when RAG is enabled
+        enable_mcp_tools = False
+        mcp_tools_config = {}
     else:
         # Default values when RAG is disabled
         chunk_size = 1000
         chunk_overlap = 200
         chunking_strategy = "recursive"
         index_type = "flat"
+        
+        # MCP Tools Settings (only shown when RAG is disabled)
+        st.sidebar.subheader("🔧 MCP Tools Settings")
+        
+        enable_mcp_tools = st.sidebar.checkbox(
+            "Enable MCP Tools",
+            value=True,
+            help="Enable MCP tools for enhanced chat capabilities"
+        )
+        
+        if enable_mcp_tools:
+            st.sidebar.write("**Available Tools:**")
+            
+            # Tool selection
+            available_tools = {
+                "web_search": "🌐 Web Search",
+                "runtime_logs": "📊 Runtime Logs",
+                "runtime_errors": "🐛 Runtime Errors",
+                "file_operations": "📁 File Operations",
+                "code_execution": "💻 Code Execution",
+                "memory_management": "🧠 Memory Management"
+            }
+            
+            selected_tools = []
+            for tool_id, tool_name in available_tools.items():
+                if st.sidebar.checkbox(tool_name, value=True, key=f"tool_{tool_id}"):
+                    selected_tools.append(tool_id)
+            
+            mcp_tools_config = {
+                "enabled_tools": selected_tools
+            }
+            
+            if selected_tools:
+                st.sidebar.success(f"✅ {len(selected_tools)} tools enabled")
+            else:
+                st.sidebar.warning("⚠️ No tools selected")
+        else:
+            mcp_tools_config = {}
     
     # Connection and Initialization
     st.sidebar.subheader("🔗 Connection")
@@ -312,7 +356,9 @@ def sidebar_configuration():
                     chunking_strategy=chunking_strategy,
                     temperature=temperature,
                     max_retrieved_docs=max_retrieved_docs,
-                    index_type=index_type
+                    index_type=index_type,
+                    enable_mcp_tools=enable_mcp_tools,
+                    mcp_tools_config=mcp_tools_config
                 )
                 
                 st.session_state.rag_engine = rag_engine
@@ -372,7 +418,8 @@ def sidebar_configuration():
         3. Click "Test Connection" first
         4. Click "Initialize System"
         5. Toggle RAG on/off as needed
-        6. Start chatting!
+        6. Configure MCP tools (when RAG is disabled)
+        7. Start chatting!
         
         **Common Issues:**
         
@@ -391,6 +438,13 @@ def sidebar_configuration():
         - Check model deployment status
         - Verify embedding dimensions match
         
+        **MCP Tools Features:**
+        - **Web Search**: Real-time web information lookup
+        - **Runtime Logs**: Application monitoring and debugging
+        - **File Operations**: Read and write files safely
+        - **Code Execution**: Execute code snippets (placeholder)
+        - **Memory Management**: Save and retrieve information
+        
         **Need Help?**
         - Contact your Nutanix administrator
         - Check Nutanix Enterprise AI documentation
@@ -408,7 +462,19 @@ def rag_toggle_section():
         if st.session_state.rag_enabled:
             st.write("**Enabled** - Chat with your documents using Retrieval-Augmented Generation")
         else:
-            st.write("**Disabled** - Direct chat with the language model")
+            # Check if MCP tools are enabled
+            mcp_tools_enabled = (hasattr(st.session_state.rag_engine, 'enable_mcp_tools') and 
+                               st.session_state.rag_engine.enable_mcp_tools if st.session_state.rag_engine else False)
+            
+            if mcp_tools_enabled:
+                st.write("**Disabled** - Direct chat with the language model enhanced by MCP tools")
+                
+                # Show enabled tools
+                if st.session_state.rag_engine and st.session_state.rag_engine.mcp_tools_manager:
+                    available_tools = st.session_state.rag_engine.mcp_tools_manager.get_available_tools()
+                    st.write(f"🔧 **Active Tools:** {', '.join(available_tools)}")
+            else:
+                st.write("**Disabled** - Direct chat with the language model")
     
     with col2:
         rag_enabled = st.toggle("Enable RAG", value=st.session_state.rag_enabled)
@@ -569,10 +635,23 @@ def chat_interface():
                 st.markdown("- Summarize the key points")
                 st.markdown("- Ask specific questions about the content")
             else:
-                st.markdown("**Ask me anything:**")
-                st.markdown("- General questions")
-                st.markdown("- Technical discussions")
-                st.markdown("- Information requests")
+                # Check if MCP tools are enabled
+                mcp_tools_enabled = (hasattr(st.session_state.rag_engine, 'enable_mcp_tools') and 
+                                   st.session_state.rag_engine.enable_mcp_tools if st.session_state.rag_engine else False)
+                
+                if mcp_tools_enabled:
+                    st.markdown("**Ask me anything - I have enhanced capabilities:**")
+                    st.markdown("- 🌐 Web search for real-time information")
+                    st.markdown("- 📊 Runtime logs and error checking")
+                    st.markdown("- 📁 File operations (read/write)")
+                    st.markdown("- 💻 Code execution assistance")
+                    st.markdown("- 🧠 Memory management")
+                    st.markdown("- General questions and discussions")
+                else:
+                    st.markdown("**Ask me anything:**")
+                    st.markdown("- General questions")
+                    st.markdown("- Technical discussions")
+                    st.markdown("- Information requests")
             st.markdown("---")
     
     # Chat input at the bottom - outside the chat history container
@@ -589,8 +668,14 @@ def chat_interface():
                     # Use RAG with streaming
                     response_stream = st.session_state.rag_engine.ask_stream(prompt)
                 else:
-                    # Direct chat without RAG with streaming
-                    response_stream = st.session_state.rag_engine.chat_stream(prompt, include_context=False)
+                    # Direct chat without RAG - check if MCP tools are enabled
+                    if (hasattr(st.session_state.rag_engine, 'enable_mcp_tools') and 
+                        st.session_state.rag_engine.enable_mcp_tools):
+                        # Use MCP tools with streaming
+                        response_stream = st.session_state.rag_engine.chat_with_tools_stream(prompt)
+                    else:
+                        # Direct chat without RAG or tools
+                        response_stream = st.session_state.rag_engine.chat_stream(prompt, include_context=False)
                 
                 # Stream the response
                 response = st.write_stream(response_stream)
