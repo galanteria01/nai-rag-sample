@@ -177,15 +177,6 @@ rag = RAGEngine.create_for_nutanix(
 )
 ```
 
-### Azure OpenAI
-```python
-rag = RAGEngine.create_for_azure(
-    api_key="your-azure-key",
-    base_url="https://your-resource.openai.azure.com/",
-    embedding_model="text-embedding-3-small",
-    chat_model="gpt-35-turbo"
-)
-```
 
 ### Custom/Local Endpoints
 ```python

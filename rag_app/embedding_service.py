@@ -335,36 +335,4 @@ class EmbeddingService:
             **kwargs
         )
     
-    @classmethod
-    def create_for_azure(
-        cls,
-        api_key: str,
-        base_url: str,
-        model_name: str,
-        api_version: str = "2023-05-15",
-        **kwargs
-    ) -> "EmbeddingService":
-        """
-        Convenience method to create an embedding service for Azure OpenAI.
-        
-        Args:
-            api_key: Azure API key
-            base_url: Azure endpoint URL
-            model_name: Model deployment name
-            api_version: API version
-            **kwargs: Additional arguments
-            
-        Returns:
-            Configured EmbeddingService instance
-        """
-        # Add API version to headers for Azure
-        custom_headers = kwargs.get("custom_headers", {})
-        custom_headers["api-version"] = api_version
-        kwargs["custom_headers"] = custom_headers
-        
-        return cls(
-            api_key=api_key,
-            base_url=base_url,
-            model_name=model_name,
-            **kwargs
-        ) 
+   
