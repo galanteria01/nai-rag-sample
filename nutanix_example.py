@@ -52,6 +52,38 @@ st.markdown("""
         position: sticky;
         bottom: 0;
         padding-top: 1rem;
+        margin-top: 1rem;
+    }
+    /* Chat container styling */
+    .chat-container {
+        max-height: 60vh;
+        overflow-y: auto;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background: #fafafa;
+        margin-bottom: 1rem;
+    }
+    /* Chat header styling */
+    .chat-header {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+        border-left: 4px solid #0080ff;
+    }
+    /* Empty state styling */
+    .empty-chat {
+        text-align: center;
+        padding: 2rem;
+        color: #666;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    /* Expander styling for knowledge base */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+        border-radius: 0.5rem;
+        border-left: 4px solid #0080ff;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -367,7 +399,7 @@ def sidebar_configuration():
 
 def rag_toggle_section():
     """Create the RAG toggle section."""
-    st.markdown('<div class="rag-toggle">', unsafe_allow_html=True)
+    # st.markdown('<div class="rag-toggle">', unsafe_allow_html=True)
     
     col1, col2 = st.columns([3, 1])
     
@@ -501,31 +533,50 @@ def file_upload_section():
 
 def chat_interface():
     """Create the main chat interface."""
-    st.subheader("💬 Chat Interface")
-    
-    # Show current mode information and controls
+    # Chat header with mode information and controls
     col1, col2 = st.columns([4, 1])
     
     with col1:
         if st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
+            st.markdown("#### 💬 Chat with Your Documents")
             st.info("🔍 **RAG Mode Active** - Your questions will be answered using uploaded documents")
         elif st.session_state.rag_enabled and not st.session_state.knowledge_base_loaded:
+            st.markdown("#### 💬 Chat Interface")
             st.warning("📄 **RAG Mode** - Please upload documents first to enable document-based answers")
-        else:
-            st.info("🤖 **Direct Chat Mode** - Chatting directly with the language model")
     
     with col2:
-        if st.session_state.chat_history and st.button("🗑️ Clear Chat", help="Clear chat history"):
+        if st.session_state.chat_history and st.button("🗑️ Clear Chat", help="Clear chat history", use_container_width=True):
             st.session_state.chat_history = []
             st.rerun()
     
-    # Display chat history using st.chat_message for better formatting
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
+    # Chat history container
+    chat_history_container = st.container()
     
-    # Chat input
-    if prompt := st.chat_input("Ask a question..."):
+    with chat_history_container:
+        # Display chat history using st.chat_message for better formatting
+        if st.session_state.chat_history:
+            for message in st.session_state.chat_history:
+                with st.chat_message(message["role"]):
+                    st.write(message["content"])
+        else:
+            # Show helpful message when no chat history exists
+            st.markdown("---")
+            st.markdown("**💡 Start a conversation by typing your question below**")
+            
+            if st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
+                st.markdown("**Try asking about your uploaded documents:**")
+                st.markdown("- What are the main topics in the documents?")
+                st.markdown("- Summarize the key points")
+                st.markdown("- Ask specific questions about the content")
+            else:
+                st.markdown("**Ask me anything:**")
+                st.markdown("- General questions")
+                st.markdown("- Technical discussions")
+                st.markdown("- Information requests")
+            st.markdown("---")
+    
+    # Chat input at the bottom - outside the chat history container
+    if prompt := st.chat_input("Ask a question...", key="chat_input"):
         # Add user message to history and display it
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -636,28 +687,26 @@ def main():
         
         # Show appropriate interface based on RAG mode
         if st.session_state.rag_enabled:
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
+            # For RAG mode, show file upload in an expander at the top
+            with st.expander("📁 Knowledge Base Management", expanded=not st.session_state.knowledge_base_loaded):
                 file_upload_section()
             
-            with col2:
-                if st.session_state.knowledge_base_loaded:
-                    chat_interface()
-                else:
-                    st.info("📄 Please add documents to your knowledge base to start RAG-based chat")
-                    
-                    # Show sample questions
-                    st.subheader("❓ Sample Questions")
-                    st.markdown("""
-                    Once you add documents, you can ask questions like:
-                    - "What is Nutanix Enterprise AI?"
-                    - "What are the key features?"
-                    - "How does it support AI workloads?"
-                    """)
+            # Chat interface takes full width
+            if st.session_state.knowledge_base_loaded:
+                chat_interface()
+            else:
+                st.info("📄 Please add documents to your knowledge base to start RAG-based chat")
+                
+                # Show sample questions
+                st.subheader("❓ Sample Questions")
+                st.markdown("""
+                Once you add documents, you can ask questions like:
+                - "What is Nutanix Enterprise AI?"
+                - "What are the key features?"
+                - "How does it support AI workloads?"
+                """)
         else:
             # Direct chat mode
-            st.info("🤖 **Direct Chat Mode** - Chatting directly with the language model (no document retrieval)")
             chat_interface()
     
     # Footer
