@@ -51,7 +51,8 @@ class DocumentProcessor:
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
         chunking_strategy: str = "recursive",
-        max_tokens_per_chunk: Optional[int] = None
+        max_tokens_per_chunk: Optional[int] = None,
+        min_chunk_size: int = 10
     ):
         """
         Initialize the document processor.
@@ -61,33 +62,36 @@ class DocumentProcessor:
             chunk_overlap: Number of characters to overlap between chunks
             chunking_strategy: Strategy to use for chunking ('recursive', 'token', 'sentence')
             max_tokens_per_chunk: Maximum tokens per chunk (if using token-based chunking)
+            min_chunk_size: Minimum size for text chunks (in characters)
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.chunking_strategy = chunking_strategy
         self.max_tokens_per_chunk = max_tokens_per_chunk
+        self.min_chunk_size = min_chunk_size
         
         # Initialize text splitter
         self._initialize_text_splitter()
     
     def _initialize_text_splitter(self):
-        """Initialize the text splitter based on the chosen strategy."""
+        """Initialize the text splitter based on the chunking strategy."""
         if self.chunking_strategy == "recursive":
             self.text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
-                length_function=len,
                 separators=["\n\n", "\n", " ", ""]
             )
         elif self.chunking_strategy == "token":
-            if self.max_tokens_per_chunk is None:
-                raise ValueError("max_tokens_per_chunk must be specified for token chunking")
             self.text_splitter = TokenTextSplitter(
-                chunk_size=self.max_tokens_per_chunk,
+                chunk_size=self.max_tokens_per_chunk or self.chunk_size,
                 chunk_overlap=self.chunk_overlap
             )
         else:
-            raise ValueError(f"Unsupported chunking strategy: {self.chunking_strategy}")
+            # Default to recursive
+            self.text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap
+            )
     
     def process_file(self, file_path: str, metadata: Optional[Dict[str, Any]] = None) -> List[Document]:
         """
@@ -323,10 +327,14 @@ class DocumentProcessor:
         if not text.strip():
             return []
         
+        # If text is shorter than chunk size, return as single chunk
+        if len(text) <= self.chunk_size:
+            return [text] if len(text.strip()) >= self.min_chunk_size else []
+        
         chunks = self.text_splitter.split_text(text)
         
         # Filter out very short chunks
-        chunks = [chunk for chunk in chunks if len(chunk.strip()) > 50]
+        chunks = [chunk for chunk in chunks if len(chunk.strip()) >= self.min_chunk_size]
         
         return chunks
     
@@ -386,5 +394,6 @@ class DocumentProcessor:
             "chunk_overlap": self.chunk_overlap,
             "chunking_strategy": self.chunking_strategy,
             "max_tokens_per_chunk": self.max_tokens_per_chunk,
+            "min_chunk_size": self.min_chunk_size,
             "supported_extensions": self.get_supported_extensions()
         } 

@@ -36,7 +36,9 @@ class RAGEngine:
         max_context_tokens: int = 8000,
         max_retrieved_docs: int = 5,
         custom_headers: Optional[Dict[str, str]] = None,
-        timeout: float = 60.0
+        timeout: float = 60.0,
+        auto_persist: bool = True,
+        persist_path: str = "vector_store"
     ):
         """
         Initialize the RAG engine.
@@ -53,6 +55,8 @@ class RAGEngine:
             max_retrieved_docs: Maximum number of documents to retrieve
             custom_headers: Optional custom headers for API requests
             timeout: Request timeout in seconds
+            auto_persist: Whether to automatically save vector store when documents are added
+            persist_path: Path to save/load vector store
         """
         self.embedding_service = embedding_service
         self.vector_store = vector_store
@@ -63,10 +67,12 @@ class RAGEngine:
         self.max_retrieved_docs = max_retrieved_docs
         self.custom_headers = custom_headers or {}
         self.timeout = timeout
+        self.auto_persist = auto_persist
+        self.persist_path = persist_path
         
         # Initialize OpenAI client for chat completion
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.api_key = api_key or os.getenv("NUTANIX_API_KEY")
+        self.base_url = base_url or os.getenv("NUTANIX_ENDPOINT")
         
         if not self.api_key:
             raise ValueError("API key is required. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
@@ -160,14 +166,57 @@ Please answer the following question based on the context above."""
         added_ids = []
         
         for document in documents:
-            if document.embedding is None:
-                # Create embedding for the document
-                document.embedding = self.embedding_service.create_embedding(document.content)
-            
-            self.vector_store.add_document(document)
-            added_ids.append(document.id)
+            try:
+                if document.embedding is None:
+                    # Create embedding for the document
+                    document.embedding = self.embedding_service.create_embedding(document.content)
+                
+                self.vector_store.add_document(document)
+                added_ids.append(document.id)
+                
+            except Exception as e:
+                # Provide more specific error message
+                error_msg = str(e)
+                if "401" in error_msg or "invalid_api_key" in error_msg.lower():
+                    raise Exception(f"API key error: Please check your API key configuration. {error_msg}")
+                elif "404" in error_msg or "model" in error_msg.lower():
+                    raise Exception(f"Model error: Please check your model name configuration. {error_msg}")
+                elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                    raise Exception(f"Connection error: Please check your internet connection and endpoint URL. {error_msg}")
+                else:
+                    raise Exception(f"Embedding creation failed: {error_msg}")
+        
+        # Auto-persist if enabled
+        if self.auto_persist and added_ids:
+            self._save_vector_store()
         
         return added_ids
+    
+    def clear_vector_store(self):
+        """
+        Clear all documents from the vector store.
+        """
+        self.vector_store.clear()
+        # Remove persisted files if they exist
+        if self.auto_persist:
+            self._remove_persisted_files()
+    
+    def _save_vector_store(self):
+        """Save the vector store to disk."""
+        try:
+            self.vector_store.save(self.persist_path)
+        except Exception as e:
+            print(f"Warning: Could not save vector store: {e}")
+    
+    def _remove_persisted_files(self):
+        """Remove persisted vector store files."""
+        try:
+            for suffix in [".index", ".metadata"]:
+                filepath = f"{self.persist_path}{suffix}"
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+        except Exception as e:
+            print(f"Warning: Could not remove persisted files: {e}")
     
     def add_document_from_file(self, file_path: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
         """
@@ -681,56 +730,45 @@ Please answer the following question based on the context above."""
         **kwargs
     ) -> "RAGEngine":
         """
-        Convenience method to create a RAG engine for Nutanix Enterprise AI.
+        Create a RAG engine configured for Nutanix Enterprise AI.
         
         Args:
-            api_key: Nutanix API key
-            base_url: Nutanix endpoint URL
-            embedding_model: Embedding model name in Nutanix
-            chat_model: Chat model name in Nutanix
+            api_key: Nutanix Enterprise AI API key
+            base_url: Nutanix Enterprise AI endpoint URL
+            embedding_model: Name of the embedding model
+            chat_model: Name of the chat model
             embedding_dimension: Dimension of embeddings
-            **kwargs: Additional arguments
+            **kwargs: Additional arguments for RAG engine
             
         Returns:
-            Configured RAGEngine instance
+            Configured RAG engine
         """
-        # Extract parameters for embedding service
-        embedding_service_kwargs = {
-            "max_tokens": kwargs.get("max_tokens", 8192),
-            "custom_headers": kwargs.get("custom_headers", None),
-            "timeout": kwargs.get("timeout", 60.0)
-        }
+        from .embedding_service import EmbeddingService
+        from .document_processor import DocumentProcessor
         
         # Create embedding service
         embedding_service = EmbeddingService.create_for_nutanix(
             api_key=api_key,
             base_url=base_url,
-            model_name=embedding_model,
-            **embedding_service_kwargs
+            model_name=embedding_model
         )
         
-        # Create vector store
-        vector_store = VectorStore(
+        # Get persist path from kwargs or use default
+        persist_path = kwargs.get('persist_path', 'nutanix_vector_store')
+        
+        # Create or load vector store
+        vector_store = VectorStore.load_or_create(
+            filepath=persist_path,
             dimension=embedding_dimension,
-            index_type=kwargs.get("index_type", "flat")
+            index_type=kwargs.get('index_type', 'flat')
         )
         
         # Create document processor
         document_processor = DocumentProcessor(
-            chunk_size=kwargs.get("chunk_size", 1000),
-            chunk_overlap=kwargs.get("chunk_overlap", 200),
-            chunking_strategy=kwargs.get("chunking_strategy", "recursive"),
-            max_tokens_per_chunk=kwargs.get("max_tokens_per_chunk", None)
+            chunk_size=kwargs.get('chunk_size', 1000),
+            chunk_overlap=kwargs.get('chunk_overlap', 200),
+            chunking_strategy=kwargs.get('chunking_strategy', 'recursive')
         )
-        
-        # Extract only the parameters that RAGEngine constructor accepts
-        rag_engine_kwargs = {
-            "temperature": kwargs.get("temperature", 0.7),
-            "max_context_tokens": kwargs.get("max_context_tokens", 8000),
-            "max_retrieved_docs": kwargs.get("max_retrieved_docs", 5),
-            "custom_headers": kwargs.get("custom_headers", None),
-            "timeout": kwargs.get("timeout", 60.0)
-        }
         
         # Create RAG engine
         return cls(
@@ -740,5 +778,45 @@ Please answer the following question based on the context above."""
             api_key=api_key,
             base_url=base_url,
             model_name=chat_model,
-            **rag_engine_kwargs
+            persist_path=persist_path,
+            **{k: v for k, v in kwargs.items() if k not in ['persist_path', 'index_type', 'chunk_size', 'chunk_overlap', 'chunking_strategy']}
+        )
+    
+    @classmethod
+    def create_with_persistent_store(
+        cls,
+        embedding_service: EmbeddingService,
+        document_processor: DocumentProcessor,
+        persist_path: str = "vector_store",
+        **kwargs
+    ) -> "RAGEngine":
+        """
+        Create a RAG engine with persistent vector store.
+        
+        Args:
+            embedding_service: Service for creating embeddings
+            document_processor: Processor for handling documents
+            persist_path: Path to save/load vector store
+            **kwargs: Additional arguments for RAG engine
+            
+        Returns:
+            RAG engine with persistent vector store
+        """
+        # Get embedding dimension
+        embedding_dim = embedding_service.get_embedding_dimension()
+        
+        # Create or load vector store
+        vector_store = VectorStore.load_or_create(
+            filepath=persist_path,
+            dimension=embedding_dim,
+            index_type=kwargs.get('index_type', 'flat')
+        )
+        
+        # Create RAG engine
+        return cls(
+            embedding_service=embedding_service,
+            vector_store=vector_store,
+            document_processor=document_processor,
+            persist_path=persist_path,
+            **{k: v for k, v in kwargs.items() if k != 'index_type'}
         ) 

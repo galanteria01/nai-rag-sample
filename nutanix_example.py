@@ -124,13 +124,14 @@ def sidebar_configuration():
     
     embedding_model = st.sidebar.text_input(
         "Embedding Model",
-        value="text-embedding-3-small",
+        value="embedcpu",
         help="Enter the exact embedding model name available in your Nutanix deployment"
+        
     )
     
     chat_model = st.sidebar.text_input(
         "Chat Model",
-        value="llama2-7b-chat",
+        value="llama-3-3-70b",
         help="Enter the exact chat model name available in your Nutanix deployment"
     )
     
@@ -138,7 +139,7 @@ def sidebar_configuration():
         "Embedding Dimension",
         min_value=128,
         max_value=4096,
-        value=1536,
+        value=384,
         help="Dimension of embeddings from your model"
     )
     
@@ -441,9 +442,13 @@ def file_upload_section():
     
     with col2:
         if st.session_state.knowledge_base_loaded and st.button("🗑️ Clear Knowledge Base", use_container_width=True):
-            # Reset the vector store (this would require implementing a clear method)
-            st.session_state.knowledge_base_loaded = False
-            st.success("✅ Knowledge base cleared!")
+            # Clear the vector store properly
+            if st.session_state.rag_engine:
+                st.session_state.rag_engine.clear_vector_store()
+                st.session_state.knowledge_base_loaded = False
+                st.success("✅ Knowledge base cleared!")
+            else:
+                st.error("❌ No RAG engine available to clear")
     
     # File Upload
     st.write("**Upload Your Documents:**")

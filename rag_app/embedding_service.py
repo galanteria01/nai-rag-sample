@@ -38,8 +38,8 @@ class EmbeddingService:
             custom_headers: Optional custom headers for API requests
             timeout: Request timeout in seconds
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.api_key = api_key or os.getenv("NUTANIX_API_KEY")
+        self.base_url = base_url or os.getenv("NUTANIX_ENDPOINT")
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.custom_headers = custom_headers or {}
@@ -146,7 +146,6 @@ class EmbeddingService:
                 input=text,
                 encoding_format="float"
             )
-            
             embedding = response.data[0].embedding
             return np.array(embedding, dtype=np.float32)
             

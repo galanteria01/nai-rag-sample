@@ -60,11 +60,50 @@ class VectorStore:
             self.index = faiss.IndexFlatIP(self.dimension)  # Inner product for cosine similarity
         elif self.index_type == "ivf":
             quantizer = faiss.IndexFlatIP(self.dimension)
-            self.index = faiss.IndexIVFFlat(quantizer, self.dimension, min(100, max(1, len(self.documents) // 10)))
+            # Use a reasonable number of centroids, minimum 1
+            n_centroids = max(1, min(256, len(self.documents) // 10)) if self.documents else 10
+            self.index = faiss.IndexIVFFlat(quantizer, self.dimension, n_centroids)
+            # Set a reasonable search parameter
+            self.index.nprobe = min(10, n_centroids)
         elif self.index_type == "hnsw":
             self.index = faiss.IndexHNSWFlat(self.dimension, 32)
         else:
             raise ValueError(f"Unsupported index type: {self.index_type}")
+    
+    def can_add_documents(self) -> bool:
+        """
+        Check if the vector store can accept new documents.
+        
+        Returns:
+            True if documents can be added, False otherwise
+        """
+        if self.index_type == "ivf":
+            return self.index.is_trained or len(self.documents) < 10
+        return True
+    
+    def get_training_status(self) -> Dict[str, Any]:
+        """
+        Get the training status of the index.
+        
+        Returns:
+            Dictionary with training status information
+        """
+        if self.index_type == "ivf":
+            return {
+                "index_type": self.index_type,
+                "is_trained": self.index.is_trained,
+                "documents_count": len(self.documents),
+                "min_training_docs": 10,
+                "can_add_documents": self.can_add_documents()
+            }
+        else:
+            return {
+                "index_type": self.index_type,
+                "is_trained": True,
+                "documents_count": len(self.documents),
+                "min_training_docs": 0,
+                "can_add_documents": True
+            }
     
     def add_document(self, document: Document):
         """
@@ -76,23 +115,84 @@ class VectorStore:
         if document.embedding is None:
             raise ValueError("Document must have an embedding")
         
+        # Ensure embedding is float32 (required by FAISS)
+        embedding = np.array(document.embedding, dtype=np.float32)
+        
+        # Check dimension compatibility
+        if embedding.shape[0] != self.dimension:
+            raise ValueError(f"Embedding dimension {embedding.shape[0]} doesn't match index dimension {self.dimension}")
+        
         # Normalize embedding for cosine similarity
-        normalized_embedding = self._normalize_embedding(document.embedding)
+        normalized_embedding = self._normalize_embedding(embedding)
         
-        # Add to FAISS index
-        self.index.add(normalized_embedding.reshape(1, -1))
-        
-        # Update mappings
-        self.documents[document.id] = document
-        self.id_to_index[document.id] = self.current_index
-        self.index_to_id[self.current_index] = document.id
-        self.current_index += 1
-        
-        # Train index if needed (for IVF)
-        if self.index_type == "ivf" and not self.index.is_trained and len(self.documents) >= 100:
-            embeddings = np.array([doc.embedding for doc in self.documents.values()])
-            normalized_embeddings = self._normalize_embeddings(embeddings)
-            self.index.train(normalized_embeddings)
+        # For IVF indices, we need special handling
+        if self.index_type == "ivf":
+            # Store document first
+            self.documents[document.id] = document
+            self.id_to_index[document.id] = self.current_index
+            self.index_to_id[self.current_index] = document.id
+            self.current_index += 1
+            
+            # Train index if we have enough documents and it's not trained
+            if not self.index.is_trained:
+                self._train_ivf_index_if_needed()
+            
+            # Add to index if it's trained
+            if self.index.is_trained:
+                try:
+                    self.index.add(normalized_embedding.reshape(1, -1))
+                except Exception as e:
+                    # Remove from mappings if add fails
+                    del self.documents[document.id]
+                    del self.id_to_index[document.id]
+                    del self.index_to_id[self.current_index - 1]
+                    self.current_index -= 1
+                    raise Exception(f"Failed to add document to FAISS index: {e}")
+        else:
+            # For flat and HNSW indices, add directly
+            try:
+                self.index.add(normalized_embedding.reshape(1, -1))
+                
+                # Update mappings only after successful add
+                self.documents[document.id] = document
+                self.id_to_index[document.id] = self.current_index
+                self.index_to_id[self.current_index] = document.id
+                self.current_index += 1
+                
+            except Exception as e:
+                raise Exception(f"Failed to add document to FAISS index: {e}")
+    
+    def _train_ivf_index_if_needed(self):
+        """Train IVF index if it has enough documents and isn't trained yet."""
+        if self.index_type == "ivf" and not self.index.is_trained and len(self.documents) >= 10:
+            # Collect all embeddings for training
+            embeddings = []
+            for document in self.documents.values():
+                if document.embedding is not None:
+                    embedding = np.array(document.embedding, dtype=np.float32)
+                    embeddings.append(embedding)
+            
+            if embeddings:
+                training_data = np.array(embeddings, dtype=np.float32)
+                normalized_training_data = self._normalize_embeddings(training_data)
+                
+                try:
+                    self.index.train(normalized_training_data)
+                    print(f"IVF index trained with {len(embeddings)} vectors")
+                    
+                    # Now add all stored embeddings to the trained index
+                    self.index.add(normalized_training_data)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to train IVF index: {e}")
+                    # Fall back to flat index
+                    self.index_type = "flat"
+                    self._initialize_index()
+                    
+                    # Add all embeddings to the flat index
+                    for embedding in embeddings:
+                        normalized_embedding = self._normalize_embedding(embedding)
+                        self.index.add(normalized_embedding.reshape(1, -1))
     
     def add_documents(self, documents: List[Document]):
         """
@@ -101,8 +201,58 @@ class VectorStore:
         Args:
             documents: List of documents to add
         """
-        for document in documents:
-            self.add_document(document)
+        if not documents:
+            return
+            
+        # For IVF indices, we can optimize by batching
+        if self.index_type == "ivf":
+            # Add all documents to storage first
+            embeddings = []
+            for document in documents:
+                if document.embedding is None:
+                    raise ValueError("Document must have an embedding")
+                
+                # Ensure embedding is float32
+                embedding = np.array(document.embedding, dtype=np.float32)
+                
+                # Check dimension compatibility
+                if embedding.shape[0] != self.dimension:
+                    raise ValueError(f"Embedding dimension {embedding.shape[0]} doesn't match index dimension {self.dimension}")
+                
+                # Store document
+                self.documents[document.id] = document
+                self.id_to_index[document.id] = self.current_index
+                self.index_to_id[self.current_index] = document.id
+                self.current_index += 1
+                
+                embeddings.append(embedding)
+            
+            # Train if needed and we have enough documents
+            if not self.index.is_trained:
+                self._train_ivf_index_if_needed()
+            
+            # Add all embeddings if index is trained
+            if self.index.is_trained and embeddings:
+                try:
+                    embeddings_array = np.array(embeddings, dtype=np.float32)
+                    normalized_embeddings = self._normalize_embeddings(embeddings_array)
+                    self.index.add(normalized_embeddings)
+                except Exception as e:
+                    # Remove all added documents if batch add fails
+                    for document in documents:
+                        if document.id in self.documents:
+                            del self.documents[document.id]
+                            if document.id in self.id_to_index:
+                                idx = self.id_to_index[document.id]
+                                del self.id_to_index[document.id]
+                                if idx in self.index_to_id:
+                                    del self.index_to_id[idx]
+                    self.current_index -= len(documents)
+                    raise Exception(f"Failed to add documents to FAISS index: {e}")
+        else:
+            # For flat and HNSW indices, add one by one
+            for document in documents:
+                self.add_document(document)
     
     def search(
         self, 
@@ -124,18 +274,40 @@ class VectorStore:
         if len(self.documents) == 0:
             return []
         
+        # Ensure query embedding is float32
+        query_embedding = np.array(query_embedding, dtype=np.float32)
+        
+        # Check dimension compatibility
+        if query_embedding.shape[0] != self.dimension:
+            raise ValueError(f"Query embedding dimension {query_embedding.shape[0]} doesn't match index dimension {self.dimension}")
+        
         # Normalize query embedding
         normalized_query = self._normalize_embedding(query_embedding)
         
-        # Search in FAISS index
-        scores, indices = self.index.search(normalized_query.reshape(1, -1), min(k * 2, len(self.documents)))
+        # For IVF indices, check if it's trained
+        if self.index_type == "ivf" and not self.index.is_trained:
+            print("Warning: IVF index not trained, no search results available")
+            return []
+        
+        try:
+            # Search in FAISS index
+            scores, indices = self.index.search(normalized_query.reshape(1, -1), min(k * 2, len(self.documents)))
+        except Exception as e:
+            print(f"Warning: Search failed: {e}")
+            return []
         
         results = []
         for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
             if idx == -1:  # Invalid index
                 continue
             
+            if idx not in self.index_to_id:
+                continue
+            
             doc_id = self.index_to_id[idx]
+            if doc_id not in self.documents:
+                continue
+                
             document = self.documents[doc_id]
             
             # Apply metadata filters if provided
@@ -232,12 +404,35 @@ class VectorStore:
         doc_ids = []
         
         for doc_id, document in self.documents.items():
-            embeddings.append(document.embedding)
-            doc_ids.append(doc_id)
+            if document.embedding is not None:
+                # Ensure float32
+                embedding = np.array(document.embedding, dtype=np.float32)
+                embeddings.append(embedding)
+                doc_ids.append(doc_id)
         
         if embeddings:
-            normalized_embeddings = self._normalize_embeddings(np.array(embeddings))
-            self.index.add(normalized_embeddings)
+            embeddings_array = np.array(embeddings, dtype=np.float32)
+            normalized_embeddings = self._normalize_embeddings(embeddings_array)
+            
+            # Handle IVF index training
+            if self.index_type == "ivf" and len(embeddings) >= 10:
+                try:
+                    self.index.train(normalized_embeddings)
+                    self.index.add(normalized_embeddings)
+                except Exception as e:
+                    print(f"Warning: Failed to rebuild IVF index: {e}")
+                    # Fall back to flat index
+                    self.index_type = "flat"
+                    self._initialize_index()
+                    self.index.add(normalized_embeddings)
+            else:
+                # For flat, HNSW, or IVF with insufficient data
+                if self.index_type == "ivf" and len(embeddings) < 10:
+                    print(f"Warning: Not enough data to train IVF index ({len(embeddings)} < 10), falling back to flat")
+                    self.index_type = "flat"
+                    self._initialize_index()
+                
+                self.index.add(normalized_embeddings)
             
             # Update mappings
             self.id_to_index = {doc_id: i for i, doc_id in enumerate(doc_ids)}
@@ -246,6 +441,8 @@ class VectorStore:
     
     def _normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
         """Normalize a single embedding for cosine similarity."""
+        # Ensure float32
+        embedding = np.array(embedding, dtype=np.float32)
         norm = np.linalg.norm(embedding)
         if norm == 0:
             return embedding
@@ -253,6 +450,8 @@ class VectorStore:
     
     def _normalize_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
         """Normalize multiple embeddings for cosine similarity."""
+        # Ensure float32
+        embeddings = np.array(embeddings, dtype=np.float32)
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1  # Avoid division by zero
         return embeddings / norms
@@ -270,6 +469,25 @@ class VectorStore:
                     return False
         return True
     
+    def clear(self):
+        """
+        Clear all documents from the vector store.
+        """
+        self.documents.clear()
+        self.id_to_index.clear()
+        self.index_to_id.clear()
+        self.current_index = 0
+        self._initialize_index()
+    
+    def is_empty(self) -> bool:
+        """
+        Check if the vector store is empty.
+        
+        Returns:
+            True if no documents are stored, False otherwise
+        """
+        return len(self.documents) == 0
+    
     def get_stats(self) -> Dict[str, Any]:
         """
         Get statistics about the vector store.
@@ -277,13 +495,24 @@ class VectorStore:
         Returns:
             Dictionary with statistics
         """
-        return {
+        stats = {
             "total_documents": len(self.documents),
             "dimension": self.dimension,
             "index_type": self.index_type,
             "is_trained": getattr(self.index, 'is_trained', True),
+            "is_empty": self.is_empty(),
             "memory_usage_mb": self.index.compute_memory_usage() / 1024 / 1024 if hasattr(self.index, 'compute_memory_usage') else None
         }
+        
+        # Add training status for IVF indices
+        if self.index_type == "ivf":
+            stats.update({
+                "min_training_docs": 10,
+                "can_add_documents": self.can_add_documents(),
+                "nprobe": getattr(self.index, 'nprobe', None)
+            })
+        
+        return stats
     
     def list_documents(self, limit: int = 100, offset: int = 0) -> List[Document]:
         """
@@ -298,7 +527,7 @@ class VectorStore:
         """
         all_docs = list(self.documents.values())
         return all_docs[offset:offset + limit]
-    
+
     def save(self, filepath: str):
         """
         Save the vector store to disk.
@@ -306,6 +535,10 @@ class VectorStore:
         Args:
             filepath: Path to save the vector store
         """
+        # Don't save if empty
+        if self.is_empty():
+            return
+        
         # Create directory if it doesn't exist (only if filepath has a directory)
         directory = os.path.dirname(filepath)
         if directory:
@@ -348,6 +581,10 @@ class VectorStore:
         Returns:
             Loaded vector store
         """
+        # Check if files exist
+        if not os.path.exists(f"{filepath}.metadata") or not os.path.exists(f"{filepath}.index"):
+            raise FileNotFoundError(f"Vector store files not found at {filepath}")
+        
         # Load metadata
         with open(f"{filepath}.metadata", "r") as f:
             metadata = json.load(f)
@@ -364,7 +601,7 @@ class VectorStore:
                 id=doc_data["id"],
                 content=doc_data["content"],
                 metadata=doc_data["metadata"],
-                embedding=np.array(doc_data["embedding"]) if doc_data["embedding"] else None,
+                embedding=np.array(doc_data["embedding"], dtype=np.float32) if doc_data["embedding"] else None,
                 created_at=datetime.fromisoformat(doc_data["created_at"]) if doc_data["created_at"] else None
             )
             vector_store.documents[doc_id] = document
@@ -374,4 +611,22 @@ class VectorStore:
         vector_store.index_to_id = {int(k): v for k, v in metadata["index_to_id"].items()}
         vector_store.current_index = metadata["current_index"]
         
-        return vector_store 
+        return vector_store
+
+    @classmethod
+    def load_or_create(cls, filepath: str, dimension: int, index_type: str = "flat") -> "VectorStore":
+        """
+        Load a vector store from disk if it exists, otherwise create a new one.
+        
+        Args:
+            filepath: Path to the saved vector store
+            dimension: Dimension of the embeddings (used if creating new)
+            index_type: Type of FAISS index (used if creating new)
+            
+        Returns:
+            Loaded or new vector store
+        """
+        try:
+            return cls.load(filepath)
+        except FileNotFoundError:
+            return cls(dimension, index_type) 
