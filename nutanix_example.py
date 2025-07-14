@@ -42,7 +42,6 @@ st.markdown("""
         border-radius: 0.5rem;
         margin-bottom: 1rem;
         border-left: 4px solid #0080ff;
-        background-color: #f0f2f6;
     }
     /* Improve chat message appearance */
     .stChatMessage {
