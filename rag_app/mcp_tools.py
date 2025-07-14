@@ -450,26 +450,268 @@ class MCPToolsManager:
     
     def format_tool_results_for_chat(self, tool_results: List[ToolResult]) -> str:
         """
-        Format tool results for display in chat.
+        Format tool results for display in chat with accordion-style layout.
         
         Args:
             tool_results: List of tool results
             
         Returns:
-            Formatted string for chat display
+            Formatted string with accordion-style display for chat
         """
         if not tool_results:
             return ""
         
+        # Group results by success/failure
+        successful_results = [r for r in tool_results if r.success]
+        failed_results = [r for r in tool_results if not r.success]
+        
         formatted_parts = []
         
+        # Add header section
+        tool_count = len(tool_results)
+        success_count = len(successful_results)
+        
+        if tool_count > 0:
+            formatted_parts.append(f"## 🔧 Tool Results ({success_count}/{tool_count} successful)")
+            formatted_parts.append("")
+        
+        # Format successful results with accordion-style collapsible sections
+        for i, result in enumerate(successful_results, 1):
+            tool_icon = self._get_tool_icon(result.name)
+            formatted_parts.append(f"### {tool_icon} {result.name}")
+            
+            # Add timestamp if available
+            if result.timestamp:
+                formatted_parts.append(f"*Executed at: {result.timestamp}*")
+            
+            # Format the result based on its type
+            formatted_result = self._format_tool_result_content(result)
+            formatted_parts.append(formatted_result)
+            formatted_parts.append("")
+        
+        # Format failed results
+        for i, result in enumerate(failed_results, 1):
+            tool_icon = self._get_tool_icon(result.name)
+            formatted_parts.append(f"### ❌ {tool_icon} {result.name} - Failed")
+            
+            if result.timestamp:
+                formatted_parts.append(f"*Failed at: {result.timestamp}*")
+            
+            formatted_parts.append(f"**Error:** {result.error}")
+            formatted_parts.append("")
+        
+        return "\n".join(formatted_parts)
+    
+    def _get_tool_icon(self, tool_name: str) -> str:
+        """Get appropriate icon for tool name."""
+        icon_map = {
+            "web_search": "🌐",
+            "get_runtime_logs": "📊",
+            "get_runtime_errors": "🐛",
+            "read_file": "📄",
+            "write_file": "📝",
+            "execute_python": "💻",
+            "save_memory": "🧠",
+            "retrieve_memory": "🧠"
+        }
+        return icon_map.get(tool_name, "🔧")
+    
+    def _format_tool_result_content(self, result: ToolResult) -> str:
+        """Format tool result content based on tool type."""
+        if result.name == "web_search":
+            return self._format_web_search_result(result.result)
+        elif result.name in ["get_runtime_logs", "get_runtime_errors"]:
+            return self._format_log_result(result.result)
+        elif result.name in ["read_file", "write_file"]:
+            return self._format_file_result(result.result, result.name)
+        elif result.name == "execute_python":
+            return self._format_code_execution_result(result.result)
+        elif result.name in ["save_memory", "retrieve_memory"]:
+            return self._format_memory_result(result.result)
+        else:
+            return self._format_generic_result(result.result)
+    
+    def _format_web_search_result(self, result: Any) -> str:
+        """Format web search results."""
+        if isinstance(result, dict):
+            formatted = [f"**Query:** {result.get('query', 'N/A')}"]
+            
+            if 'results' in result:
+                formatted.append("**Results:**")
+                for i, res in enumerate(result['results'][:3], 1):  # Show top 3 results
+                    formatted.append(f"{i}. **{res.get('title', 'No title')}**")
+                    formatted.append(f"   {res.get('snippet', 'No snippet available')}")
+                    if res.get('url'):
+                        formatted.append(f"   🔗 {res['url']}")
+            
+            if 'message' in result:
+                formatted.append(f"\n*Note: {result['message']}*")
+            
+            return "\n".join(formatted)
+        
+        return f"```\n{str(result)}\n```"
+    
+    def _format_log_result(self, result: Any) -> str:
+        """Format log/error results."""
+        if isinstance(result, list):
+            if not result:
+                return "No logs found."
+            
+            formatted = ["**Log Entries:**"]
+            for i, log in enumerate(result[:5], 1):  # Show top 5 logs
+                if isinstance(log, dict):
+                    timestamp = log.get('timestamp', 'N/A')
+                    level = log.get('level', 'INFO')
+                    message = log.get('message', 'No message')
+                    module = log.get('module', 'Unknown')
+                    
+                    formatted.append(f"{i}. `[{timestamp}] {level}` - {message}")
+                    formatted.append(f"   *Module: {module}*")
+                else:
+                    formatted.append(f"{i}. {str(log)}")
+            
+            if len(result) > 5:
+                formatted.append(f"\n*... and {len(result) - 5} more entries*")
+            
+            return "\n".join(formatted)
+        
+        return f"```\n{str(result)}\n```"
+    
+    def _format_file_result(self, result: Any, tool_name: str) -> str:
+        """Format file operation results."""
+        if tool_name == "read_file":
+            if isinstance(result, str):
+                # Show preview of file content
+                lines = result.split('\n')
+                if len(lines) > 10:
+                    preview = '\n'.join(lines[:10])
+                    return f"**File Content Preview:**\n```\n{preview}\n... ({len(lines)} total lines)\n```"
+                else:
+                    return f"**File Content:**\n```\n{result}\n```"
+        elif tool_name == "write_file":
+            return f"**Result:** {result}"
+        
+        return f"```\n{str(result)}\n```"
+    
+    def _format_code_execution_result(self, result: Any) -> str:
+        """Format code execution results."""
+        if isinstance(result, dict):
+            formatted = []
+            
+            if 'code' in result:
+                formatted.append("**Code Executed:**")
+                formatted.append(f"```python\n{result['code']}\n```")
+            
+            if 'result' in result:
+                formatted.append("**Result:**")
+                formatted.append(f"```\n{result['result']}\n```")
+            
+            if 'stdout' in result and result['stdout']:
+                formatted.append("**Output:**")
+                formatted.append(f"```\n{result['stdout']}\n```")
+            
+            if 'stderr' in result and result['stderr']:
+                formatted.append("**Errors:**")
+                formatted.append(f"```\n{result['stderr']}\n```")
+            
+            if 'execution_time' in result:
+                formatted.append(f"**Execution Time:** {result['execution_time']}s")
+            
+            return "\n".join(formatted)
+        
+        return f"```\n{str(result)}\n```"
+    
+    def _format_memory_result(self, result: Any) -> str:
+        """Format memory operation results."""
+        return f"**Result:** {result}"
+    
+    def _format_generic_result(self, result: Any) -> str:
+        """Format generic tool results."""
+        if isinstance(result, dict):
+            formatted = ["**Result:**"]
+            for key, value in result.items():
+                formatted.append(f"- **{key}:** {value}")
+            return "\n".join(formatted)
+        elif isinstance(result, list):
+            if not result:
+                return "No results found."
+            formatted = ["**Results:**"]
+            for i, item in enumerate(result[:5], 1):
+                formatted.append(f"{i}. {item}")
+            if len(result) > 5:
+                formatted.append(f"... and {len(result) - 5} more items")
+            return "\n".join(formatted)
+        else:
+            return f"**Result:** {result}"
+    
+    def format_tool_results_for_streaming(self, tool_results: List[ToolResult]) -> str:
+        """
+        Format tool results for streaming display with enhanced accordion-style layout.
+        This method is optimized for streaming contexts where results appear progressively.
+        
+        Args:
+            tool_results: List of tool results
+            
+        Returns:
+            Formatted string for streaming display
+        """
+        if not tool_results:
+            return ""
+        
+        # Start with a clean section header
+        formatted_parts = ["", "---", ""]
+        
+        # Add main header
+        successful_count = sum(1 for r in tool_results if r.success)
+        total_count = len(tool_results)
+        
+        if successful_count == total_count:
+            formatted_parts.append(f"## ✅ Tool Results ({total_count} successful)")
+        else:
+            formatted_parts.append(f"## 🔧 Tool Results ({successful_count}/{total_count} successful)")
+        
+        formatted_parts.append("")
+        
+        # Process each tool result
         for result in tool_results:
             if result.success:
-                formatted_parts.append(f"🔧 **{result.name}**: {str(result.result)}")
+                tool_icon = self._get_tool_icon(result.name)
+                formatted_parts.append(f"### {tool_icon} {result.name}")
+                
+                # Add a brief description of what the tool does
+                tool_description = self._get_tool_description(result.name)
+                if tool_description:
+                    formatted_parts.append(f"*{tool_description}*")
+                
+                # Format the actual result
+                formatted_result = self._format_tool_result_content(result)
+                formatted_parts.append(formatted_result)
+                formatted_parts.append("")
             else:
-                formatted_parts.append(f"❌ **{result.name}**: Error - {result.error}")
+                # Format failed results
+                tool_icon = self._get_tool_icon(result.name)
+                formatted_parts.append(f"### ❌ {tool_icon} {result.name} - Failed")
+                formatted_parts.append(f"**Error:** {result.error}")
+                formatted_parts.append("")
         
-        return "\n\n".join(formatted_parts)
+        formatted_parts.append("---")
+        formatted_parts.append("")
+        
+        return "\n".join(formatted_parts)
+    
+    def _get_tool_description(self, tool_name: str) -> str:
+        """Get a brief description of what the tool does."""
+        descriptions = {
+            "web_search": "Searched the web for real-time information",
+            "get_runtime_logs": "Retrieved application runtime logs",
+            "get_runtime_errors": "Checked for runtime errors",
+            "read_file": "Read file contents",
+            "write_file": "Wrote content to file",
+            "execute_python": "Executed Python code",
+            "save_memory": "Saved information to memory",
+            "retrieve_memory": "Retrieved information from memory"
+        }
+        return descriptions.get(tool_name, "")
     
     def get_tools_for_openai(self) -> List[Dict[str, Any]]:
         """Get tools formatted for OpenAI function calling."""

@@ -105,7 +105,7 @@ def sidebar_configuration():
     """Create the sidebar configuration panel."""
     st.sidebar.markdown("""
     <div class="nutanix-header">
-        <h2>🌟 Nutanix Enterprise AI</h2>
+        <h2>🌟 DeNuMo</h2>
         <p>Configuration</p>
     </div>
     """, unsafe_allow_html=True)
@@ -256,9 +256,9 @@ def sidebar_configuration():
             
             # Tool selection
             available_tools = {
-                "web_search": "🌐 Web Search",
-                "runtime_logs": "📊 Runtime Logs",
-                "runtime_errors": "🐛 Runtime Errors",
+                # "web_search": "🌐 Web Search",
+                # "runtime_logs": "📊 Runtime Logs",
+                # "runtime_errors": "🐛 Runtime Errors",
                 "file_operations": "📁 File Operations",
                 "code_execution": "💻 Code Execution",
                 "memory_management": "🧠 Memory Management"

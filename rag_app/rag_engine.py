@@ -676,12 +676,9 @@ Always call the appropriate tool first, then provide a comprehensive response ba
                 # Process tool calls
                 tool_results = self.mcp_tools_manager.process_tool_calls(tool_calls)
                 
-                # Show tool results
-                for tool_result in tool_results:
-                    if tool_result.success:
-                        yield f"🔧 **{tool_result.name}**: {str(tool_result.result)}\n\n"
-                    else:
-                        yield f"❌ **{tool_result.name}**: Error - {tool_result.error}\n\n"
+                # Show tool results using the new accordion-style formatting
+                formatted_results = self.mcp_tools_manager.format_tool_results_for_streaming(tool_results)
+                yield formatted_results
                 
                 # Add tool results to messages for follow-up
                 messages.append({
