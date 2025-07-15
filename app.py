@@ -17,7 +17,8 @@ st.set_page_config(
     page_title="Nutanix Enterprise AI Chat",
     page_icon="🌟",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    
 )
 
 # Custom CSS for better appearance
@@ -105,7 +106,7 @@ def sidebar_configuration():
     """Create the sidebar configuration panel."""
     st.sidebar.markdown("""
     <div class="nutanix-header">
-        <h2>🌟 DeNuMo</h2>
+        <h2>🌟 BYOD</h2>
         <p>Configuration</p>
     </div>
     """, unsafe_allow_html=True)

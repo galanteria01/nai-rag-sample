@@ -135,6 +135,5 @@ Thumbs.db
 *.log
 
 # Config files that might contain sensitive information
-config.toml
 *.env
 .env.* 
