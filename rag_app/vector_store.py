@@ -7,7 +7,6 @@ and storage of embeddings with metadata.
 
 import os
 import json
-import pickle
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import faiss

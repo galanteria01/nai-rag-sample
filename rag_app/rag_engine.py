@@ -10,13 +10,12 @@ import os
 import json
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
-import re
 
 from openai import OpenAI
 from .embedding_service import EmbeddingService
 from .vector_store import VectorStore, Document
 from .document_processor import DocumentProcessor
-from .mcp_tools import MCPToolsManager, ToolResult
+from .mcp_tools import MCPToolsManager
 
 
 class RAGEngine:
@@ -488,7 +487,7 @@ Always call the appropriate tool first, then provide a comprehensive response ba
         messages = self._truncate_messages(messages)
         
         # Get tools for function calling
-        tools = self.mcp_tools_manager.get_tools_for_openai()
+        tools = self.mcp_tools_manager.get_tools_for_nutanix()
         
         try:
             # Generate response with tools
@@ -611,7 +610,7 @@ Always call the appropriate tool first, then provide a comprehensive response ba
         messages = self._truncate_messages(messages)
         
         # Get tools for function calling
-        tools = self.mcp_tools_manager.get_tools_for_openai()
+        tools = self.mcp_tools_manager.get_tools_for_nutanix()
         
         full_response = ""
         

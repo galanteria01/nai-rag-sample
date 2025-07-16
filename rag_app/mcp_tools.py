@@ -6,11 +6,8 @@ chat capabilities when RAG is disabled.
 """
 
 import json
-import os
-import tempfile
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional
 from datetime import datetime
-import requests
 from dataclasses import dataclass
 
 
@@ -48,9 +45,6 @@ class MCPToolsManager:
             enabled_tools: List of tool names to enable. If None, all tools are enabled.
         """
         self.enabled_tools = enabled_tools or [
-            "web_search",
-            "runtime_logs",
-            "runtime_errors",
             "file_operations",
             "code_execution",
             "memory_management"
@@ -110,7 +104,7 @@ class MCPToolsManager:
                 }
             })
         
-        if "runtime_errors" in self.enabled_tools:
+        if  "runtime_errors" in self.enabled_tools:
             tools.append({
                 "type": "function",
                 "function": {
@@ -713,6 +707,6 @@ class MCPToolsManager:
         }
         return descriptions.get(tool_name, "")
     
-    def get_tools_for_openai(self) -> List[Dict[str, Any]]:
+    def get_tools_for_nutanix(self) -> List[Dict[str, Any]]:
         """Get tools formatted for OpenAI function calling."""
         return self.tool_definitions 

@@ -292,21 +292,10 @@ class EmbeddingService:
     
     def _detect_endpoint_type(self) -> str:
         """Detect the type of endpoint based on base URL."""
-        if not self.base_url:
-            return "OpenAI"
         
-        base_url_lower = self.base_url.lower()
-        
-        if "nutanix" in base_url_lower:
-            return "Nutanix Enterprise AI"
-        elif "azure" in base_url_lower:
-            return "Azure OpenAI"
-        elif "localhost" in base_url_lower or "127.0.0.1" in base_url_lower:
-            return "Local API"
-        elif "api.openai.com" in base_url_lower:
-            return "OpenAI"
-        else:
-            return "Custom Endpoint"
+
+        return "Nutanix Enterprise AI"
+
     
     @classmethod
     def create_for_nutanix(

@@ -101,12 +101,69 @@ def initialize_session_state():
         st.session_state.knowledge_base_loaded = False
     if 'mcp_tools_enabled' not in st.session_state:
         st.session_state.mcp_tools_enabled = False
+    # Configuration state
+    if 'config' not in st.session_state:
+        st.session_state.config = get_current_configuration()
+
+def initialize_rag_system(nutanix_api_key, nutanix_endpoint, embedding_model, chat_model, 
+                           embedding_dimension, temperature, max_retrieved_docs, chunk_size, 
+                           chunk_overlap, chunking_strategy, index_type, enable_mcp_tools, mcp_tools_config):
+    """Initialize the RAG system with given configuration."""
+    try:
+        # Create RAG engine
+        rag_engine = RAGEngine.create_for_nutanix(
+            api_key=nutanix_api_key,
+            base_url=nutanix_endpoint,
+            embedding_model=embedding_model,
+            chat_model=chat_model,
+            embedding_dimension=embedding_dimension,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            chunking_strategy=chunking_strategy,
+            temperature=temperature,
+            max_retrieved_docs=max_retrieved_docs,
+            index_type=index_type,
+            enable_mcp_tools=enable_mcp_tools,
+            mcp_tools_config=mcp_tools_config
+        )
+        
+        st.session_state.rag_engine = rag_engine
+        
+        # Test connection
+        connection_test = rag_engine.test_connection()
+        if connection_test["overall_success"]:
+            return {"success": True, "message": "System initialized and connected successfully!", "connection_test": connection_test}
+        else:
+            return {"success": False, "message": "System initialized but connection test failed", "connection_test": connection_test}
+            
+    except Exception as e:
+        st.session_state.rag_engine = None
+        return {"success": False, "message": str(e), "connection_test": None}
+
+def get_current_configuration():
+    """Get current configuration values from session state or defaults."""
+    if hasattr(st, 'session_state') and 'config' in st.session_state:
+        return st.session_state.config.copy()
+    else:
+        return {
+            "nutanix_api_key": os.getenv("NUTANIX_API_KEY", ""),
+            "nutanix_endpoint": os.getenv("NUTANIX_ENDPOINT", ""),
+            "embedding_model": "embedcpu",
+            "chat_model": "llama-3-3-70b",
+            "embedding_dimension": 384,
+            "temperature": 0.7,
+            "max_retrieved_docs": 5,
+            "chunk_size": 1000,
+            "chunk_overlap": 200,
+            "chunking_strategy": "recursive",
+            "index_type": "flat"
+        }
 
 def sidebar_configuration():
     """Create the sidebar configuration panel."""
     st.sidebar.markdown("""
     <div class="nutanix-header">
-        <h2>🌟 BYOD</h2>
+        <h2>🌟 BYOD (Bring your own Docs)</h2>
         <p>Configuration</p>
     </div>
     """, unsafe_allow_html=True)
@@ -115,20 +172,22 @@ def sidebar_configuration():
     st.sidebar.subheader("🔐 Authentication")
     nutanix_api_key = st.sidebar.text_input(
         "API Key",
-        value=os.getenv("NUTANIX_API_KEY", ""),
+        value=st.session_state.config.get("nutanix_api_key", os.getenv("NUTANIX_API_KEY", "")),
         type="password",
         help="Enter your Nutanix Enterprise AI API key",
         placeholder="your-nutanix-api-key"
     )
+    st.session_state.config["nutanix_api_key"] = nutanix_api_key
     
     # Endpoint Configuration
     st.sidebar.subheader("🌐 Endpoint")
     nutanix_endpoint = st.sidebar.text_input(
         "Endpoint URL",
-        value=os.getenv("NUTANIX_ENDPOINT", ""),
+        value=st.session_state.config.get("nutanix_endpoint", os.getenv("NUTANIX_ENDPOINT", "")),
         help="Enter your Nutanix Enterprise AI endpoint URL (must end with /v1)",
         placeholder="https://your-nutanix-cluster/v1"
     )
+    st.session_state.config["nutanix_endpoint"] = nutanix_endpoint
     
     # Endpoint validation
     if nutanix_endpoint and not nutanix_endpoint.endswith('/v1'):
@@ -159,24 +218,28 @@ def sidebar_configuration():
     
     embedding_model = st.sidebar.text_input(
         "Embedding Model",
-        value="embedcpu",
+        value=st.session_state.config.get("embedding_model", "embedcpu"),
         help="Enter the exact embedding model name available in your Nutanix deployment"
         
     )
+    st.session_state.config["embedding_model"] = embedding_model
     
-    chat_model = st.sidebar.text_input(
+    chat_model = st.sidebar.selectbox(
         "Chat Model",
-        value="llama-3-3-70b",
-        help="Enter the exact chat model name available in your Nutanix deployment"
+        options=["demo-gemma", "llama-3-3-70b"],
+        index=1 if st.session_state.config.get("chat_model", "llama-3-3-70b") == "llama-3-3-70b" else 0,
+        help="Select the chat model available in your Nutanix deployment"
     )
+    st.session_state.config["chat_model"] = chat_model
     
     embedding_dimension = st.sidebar.number_input(
         "Embedding Dimension",
         min_value=128,
         max_value=4096,
-        value=384,
+        value=st.session_state.config.get("embedding_dimension", 384),
         help="Dimension of embeddings from your model"
     )
+    st.session_state.config["embedding_dimension"] = embedding_dimension
     
     # Advanced Settings
     st.sidebar.subheader("⚙️ Advanced Settings")
@@ -185,19 +248,21 @@ def sidebar_configuration():
         "Temperature",
         min_value=0.0,
         max_value=2.0,
-        value=0.7,
+        value=st.session_state.config.get("temperature", 0.7),
         step=0.1,
         help="Controls randomness in responses"
     )
+    st.session_state.config["temperature"] = temperature
     
     max_retrieved_docs = st.sidebar.slider(
         "Max Retrieved Documents",
         min_value=1,
         max_value=20,
-        value=5,
+        value=st.session_state.config.get("max_retrieved_docs", 5),
         step=1,
         help="Maximum number of documents to retrieve for context"
     )
+    st.session_state.config["max_retrieved_docs"] = max_retrieved_docs
     
     # RAG Settings (only shown if RAG is enabled)
     if st.session_state.rag_enabled:
@@ -207,31 +272,37 @@ def sidebar_configuration():
             "Chunk Size",
             min_value=500,
             max_value=2000,
-            value=1000,
+            value=st.session_state.config.get("chunk_size", 1000),
             step=100,
             help="Size of text chunks for processing"
         )
+        st.session_state.config["chunk_size"] = chunk_size
         
         chunk_overlap = st.sidebar.slider(
             "Chunk Overlap",
             min_value=0,
             max_value=500,
-            value=200,
+            value=st.session_state.config.get("chunk_overlap", 200),
             step=50,
             help="Overlap between consecutive chunks"
         )
+        st.session_state.config["chunk_overlap"] = chunk_overlap
         
         chunking_strategy = st.sidebar.selectbox(
             "Chunking Strategy",
             ["recursive", "token"],
+            index=0 if st.session_state.config.get("chunking_strategy", "recursive") == "recursive" else 1,
             help="Strategy for splitting documents"
         )
+        st.session_state.config["chunking_strategy"] = chunking_strategy
         
         index_type = st.sidebar.selectbox(
             "Vector Index Type",
             ["flat", "ivf", "hnsw"],
+            index=["flat", "ivf", "hnsw"].index(st.session_state.config.get("index_type", "flat")),
             help="Type of vector index for similarity search"
         )
+        st.session_state.config["index_type"] = index_type
         
         # Default MCP tools settings when RAG is enabled
         enable_mcp_tools = False
@@ -344,47 +415,42 @@ def sidebar_configuration():
     # Initialize RAG Engine
     if config_complete and st.sidebar.button("🚀 Initialize System", type="primary"):
         with st.spinner("Initializing Nutanix Enterprise AI system..."):
-            try:
-                # Create RAG engine
-                rag_engine = RAGEngine.create_for_nutanix(
-                    api_key=nutanix_api_key,
-                    base_url=nutanix_endpoint,
-                    embedding_model=embedding_model,
-                    chat_model=chat_model,
-                    embedding_dimension=embedding_dimension,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    chunking_strategy=chunking_strategy,
-                    temperature=temperature,
-                    max_retrieved_docs=max_retrieved_docs,
-                    index_type=index_type,
-                    enable_mcp_tools=enable_mcp_tools,
-                    mcp_tools_config=mcp_tools_config
-                )
-                
-                st.session_state.rag_engine = rag_engine
+            result = initialize_rag_system(
+                nutanix_api_key=nutanix_api_key,
+                nutanix_endpoint=nutanix_endpoint,
+                embedding_model=embedding_model,
+                chat_model=chat_model,
+                embedding_dimension=embedding_dimension,
+                temperature=temperature,
+                max_retrieved_docs=max_retrieved_docs,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                chunking_strategy=chunking_strategy,
+                index_type=index_type,
+                enable_mcp_tools=enable_mcp_tools,
+                mcp_tools_config=mcp_tools_config
+            )
+            
+            if result["success"]:
                 st.sidebar.success("✅ System initialized successfully!")
                 
-                # Test connection
-                connection_test = rag_engine.test_connection()
-                if connection_test["overall_success"]:
+                if result["connection_test"] and result["connection_test"]["overall_success"]:
                     st.sidebar.success("✅ Connection verified!")
                     
                     # Show detailed connection info
                     st.sidebar.write("**Connection Details:**")
-                    st.sidebar.write(f"- Embedding: {connection_test['embedding_service']['model']}")
-                    st.sidebar.write(f"- Chat: {connection_test['chat_service']['model']}")
+                    st.sidebar.write(f"- Embedding: {result['connection_test']['embedding_service']['model']}")
+                    st.sidebar.write(f"- Chat: {result['connection_test']['chat_service']['model']}")
                 else:
                     st.sidebar.error("❌ Connection test failed!")
-                    st.sidebar.error(f"Embedding: {connection_test['embedding_service']['message']}")
-                    st.sidebar.error(f"Chat: {connection_test['chat_service']['message']}")
-                    
-            except Exception as e:
-                st.sidebar.error(f"❌ Error: {str(e)}")
-                st.session_state.rag_engine = None
+                    if result["connection_test"]:
+                        st.sidebar.error(f"Embedding: {result['connection_test']['embedding_service']['message']}")
+                        st.sidebar.error(f"Chat: {result['connection_test']['chat_service']['message']}")
+            else:
+                st.sidebar.error(f"❌ Error: {result['message']}")
                 
                 # Enhanced error handling for 404
-                error_msg = str(e).lower()
+                error_msg = str(result['message']).lower()
                 if '404' in error_msg or 'not found' in error_msg:
                     st.sidebar.error("""
                     **Possible Solutions:**
@@ -481,6 +547,46 @@ def rag_toggle_section():
         rag_enabled = st.toggle("Enable RAG", value=st.session_state.rag_enabled)
         if rag_enabled != st.session_state.rag_enabled:
             st.session_state.rag_enabled = rag_enabled
+            
+            # Auto-initialize system when RAG mode changes
+            config = st.session_state.config
+            if config["nutanix_api_key"] and config["nutanix_endpoint"]:
+                with st.spinner("Reinitializing system with new RAG mode..."):
+                    # Configure MCP tools based on RAG mode
+                    if rag_enabled:
+                        # RAG mode - disable MCP tools
+                        enable_mcp_tools = False
+                        mcp_tools_config = {}
+                    else:
+                        # Direct chat mode - enable MCP tools
+                        enable_mcp_tools = True
+                        mcp_tools_config = {
+                            "enabled_tools": ["file_operations", "code_execution", "memory_management"]
+                        }
+                    
+                    result = initialize_rag_system(
+                        nutanix_api_key=config["nutanix_api_key"],
+                        nutanix_endpoint=config["nutanix_endpoint"],
+                        embedding_model=config["embedding_model"],
+                        chat_model=config["chat_model"],
+                        embedding_dimension=config["embedding_dimension"],
+                        temperature=config["temperature"],
+                        max_retrieved_docs=config["max_retrieved_docs"],
+                        chunk_size=config["chunk_size"],
+                        chunk_overlap=config["chunk_overlap"],
+                        chunking_strategy=config["chunking_strategy"],
+                        index_type=config["index_type"],
+                        enable_mcp_tools=enable_mcp_tools,
+                        mcp_tools_config=mcp_tools_config
+                    )
+                    
+                    if result["success"]:
+                        st.success(f"✅ {result['message']}")
+                    else:
+                        st.error(f"❌ {result['message']}")
+            else:
+                st.warning("⚠️ Please configure API key and endpoint in the sidebar first")
+            
             st.rerun()
     
     st.markdown('</div>', unsafe_allow_html=True)

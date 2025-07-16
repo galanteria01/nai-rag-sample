@@ -137,3 +137,7 @@ Thumbs.db
 # Config files that might contain sensitive information
 *.env
 .env.* 
+
+# Ignore local vector db
+*.index
+*.metadata
