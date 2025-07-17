@@ -47,7 +47,8 @@ class MCPToolsManager:
         self.enabled_tools = enabled_tools or [
             "file_operations",
             "code_execution",
-            "memory_management"
+            "memory_management",
+            "database_query"
         ]
         
         # Tool definitions for function calling
@@ -243,6 +244,39 @@ class MCPToolsManager:
                 }
             })
         
+        if "database_query" in self.enabled_tools:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "execute_database_query",
+                    "description": "Execute a SQL query against a connected database and return results as a table",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "SQL query to execute"
+                            },
+                            "database_url": {
+                                "type": "string",
+                                "description": "Database connection URL (e.g., sqlite:///path/to/db.sqlite, postgresql://user:pass@host:port/dbname)"
+                            },
+                            "max_rows": {
+                                "type": "integer",
+                                "default": 100,
+                                "description": "Maximum number of rows to return"
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "default": 30,
+                                "description": "Query timeout in seconds"
+                            }
+                        },
+                        "required": ["query", "database_url"]
+                    }
+                }
+            })
+        
         return tools
     
     def get_available_tools(self) -> List[str]:
@@ -304,6 +338,13 @@ class MCPToolsManager:
                 )
             elif tool_name == "retrieve_memory":
                 result = self._retrieve_memory(arguments.get("key"))
+            elif tool_name == "execute_database_query":
+                result = self._execute_database_query(
+                    arguments.get("query"),
+                    arguments.get("database_url"),
+                    arguments.get("max_rows", 100),
+                    arguments.get("timeout", 30)
+                )
             else:
                 raise ValueError(f"Unknown tool: {tool_name}")
             
@@ -419,6 +460,91 @@ class MCPToolsManager:
         # This would integrate with persistent storage
         return f"Memory retrieval for key '{key}' is not implemented. This is a placeholder response."
     
+    def _execute_database_query(self, query: str, database_url: str, max_rows: int, timeout: int) -> Dict[str, Any]:
+        """Execute a SQL query against a database and return results."""
+        if not query or not database_url:
+            raise ValueError("Query and database URL are required")
+        
+        # Import database libraries
+        try:
+            from sqlalchemy import create_engine, text
+            import pandas as pd
+        except ImportError as e:
+            raise RuntimeError(f"Required database libraries not installed: {str(e)}")
+        
+        # Validate the query (basic safety check)
+        query_lower = query.lower().strip()
+        dangerous_keywords = ['drop', 'delete', 'truncate', 'alter', 'create', 'insert', 'update']
+        
+        # Allow only SELECT statements for safety
+        if not query_lower.startswith('select'):
+            raise ValueError("Only SELECT queries are allowed for security reasons")
+        
+        # Check for dangerous keywords in the middle of the query
+        for keyword in dangerous_keywords:
+            if f' {keyword} ' in query_lower or f';{keyword}' in query_lower:
+                raise ValueError(f"Query contains potentially dangerous keyword: {keyword}")
+        
+        try:
+            # Create database engine with timeout
+            engine = create_engine(
+                database_url,
+                pool_timeout=timeout,
+                pool_recycle=3600
+            )
+            
+            # Execute query with pandas for easy table formatting
+            with engine.connect() as connection:
+                # Set query timeout
+                connection = connection.execution_options(autocommit=True)
+                
+                # Execute the query
+                df = pd.read_sql_query(
+                    text(query),
+                    connection,
+                    params=None
+                )
+                
+                # Limit rows if necessary
+                if len(df) > max_rows:
+                    df = df.head(max_rows)
+                    was_truncated = True
+                else:
+                    was_truncated = False
+                
+                # Convert DataFrame to dictionary for JSON serialization
+                result = {
+                    "query": query,
+                    "success": True,
+                    "row_count": len(df),
+                    "column_count": len(df.columns),
+                    "columns": df.columns.tolist(),
+                    "data": df.to_dict('records'),  # List of row dictionaries
+                    "data_types": df.dtypes.astype(str).to_dict(),
+                    "was_truncated": was_truncated,
+                    "max_rows": max_rows,
+                    "execution_time": "Query executed successfully"
+                }
+                
+                # Add formatted table for display
+                if len(df) > 0:
+                    result["table_html"] = df.to_html(index=False, classes='table table-striped')
+                    result["table_markdown"] = df.to_markdown(index=False)
+                else:
+                    result["table_html"] = "<p>No results found</p>"
+                    result["table_markdown"] = "No results found"
+                
+                return result
+                
+        except Exception as e:
+            raise RuntimeError(f"Database query failed: {str(e)}")
+        finally:
+            # Clean up engine
+            try:
+                engine.dispose()
+            except:
+                pass
+    
     def process_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> List[ToolResult]:
         """
         Process multiple tool calls.
@@ -506,7 +632,8 @@ class MCPToolsManager:
             "write_file": "📝",
             "execute_python": "💻",
             "save_memory": "🧠",
-            "retrieve_memory": "🧠"
+            "retrieve_memory": "🧠",
+            "execute_database_query": "🗃️"
         }
         return icon_map.get(tool_name, "🔧")
     
@@ -522,6 +649,8 @@ class MCPToolsManager:
             return self._format_code_execution_result(result.result)
         elif result.name in ["save_memory", "retrieve_memory"]:
             return self._format_memory_result(result.result)
+        elif result.name == "execute_database_query":
+            return self._format_database_query_result(result.result)
         else:
             return self._format_generic_result(result.result)
     
@@ -618,6 +747,62 @@ class MCPToolsManager:
     def _format_memory_result(self, result: Any) -> str:
         """Format memory operation results."""
         return f"**Result:** {result}"
+    
+    def _format_database_query_result(self, result: Any) -> str:
+        """Format database query results with table display."""
+        if not isinstance(result, dict):
+            return f"**Unexpected result format:** {result}"
+        
+        if not result.get('success', False):
+            return f"**Query failed:** {result.get('error', 'Unknown error')}"
+        
+        formatted = []
+        
+        # Query information
+        formatted.append(f"**Query:** `{result.get('query', 'N/A')}`")
+        formatted.append(f"**Rows returned:** {result.get('row_count', 0)}")
+        formatted.append(f"**Columns:** {result.get('column_count', 0)}")
+        
+        if result.get('was_truncated'):
+            formatted.append(f"⚠️ *Results truncated to {result.get('max_rows', 'N/A')} rows*")
+        
+        formatted.append("")
+        
+        # Display table
+        if result.get('row_count', 0) > 0:
+            # Use markdown table for better formatting
+            table_markdown = result.get('table_markdown', '')
+            if table_markdown and table_markdown != "No results found":
+                formatted.append("**Results:**")
+                formatted.append(table_markdown)
+            else:
+                # Fallback to manual table formatting
+                columns = result.get('columns', [])
+                data = result.get('data', [])
+                
+                if columns and data:
+                    # Create markdown table manually
+                    formatted.append("**Results:**")
+                    formatted.append("| " + " | ".join(columns) + " |")
+                    formatted.append("| " + " | ".join(["---"] * len(columns)) + " |")
+                    
+                    for row in data[:10]:  # Show max 10 rows in chat
+                        row_values = [str(row.get(col, '')) for col in columns]
+                        formatted.append("| " + " | ".join(row_values) + " |")
+                    
+                    if len(data) > 10:
+                        formatted.append(f"*... and {len(data) - 10} more rows*")
+        else:
+            formatted.append("**No results found**")
+        
+        # Add column types info
+        if result.get('data_types'):
+            formatted.append("")
+            formatted.append("**Column Types:**")
+            for col, dtype in result.get('data_types', {}).items():
+                formatted.append(f"- `{col}`: {dtype}")
+        
+        return "\n".join(formatted)
     
     def _format_generic_result(self, result: Any) -> str:
         """Format generic tool results."""

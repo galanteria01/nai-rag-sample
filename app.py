@@ -333,7 +333,8 @@ def sidebar_configuration():
                 # "runtime_errors": "🐛 Runtime Errors",
                 "file_operations": "📁 File Operations",
                 "code_execution": "💻 Code Execution",
-                "memory_management": "🧠 Memory Management"
+                "memory_management": "🧠 Memory Management",
+                "database_query": "💾 Database Query"
             }
             
             selected_tools = []
@@ -561,7 +562,7 @@ def rag_toggle_section():
                         # Direct chat mode - enable MCP tools
                         enable_mcp_tools = True
                         mcp_tools_config = {
-                            "enabled_tools": ["file_operations", "code_execution", "memory_management"]
+                            "enabled_tools": ["file_operations", "code_execution", "memory_management", "database_query"]
                         }
                     
                     result = initialize_rag_system(
