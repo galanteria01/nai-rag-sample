@@ -129,6 +129,9 @@ cython_debug/
 ehthumbs.db
 Thumbs.db
 
+# Local SQLite database
+rag_app.db
+
 # Temporary files
 *.tmp
 *.temp

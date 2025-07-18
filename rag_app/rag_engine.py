@@ -8,6 +8,7 @@ including Nutanix Enterprise AI and other custom endpoints.
 
 import os
 import json
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -16,6 +17,7 @@ from .embedding_service import EmbeddingService
 from .vector_store import VectorStore, Document
 from .document_processor import DocumentProcessor
 from .mcp_tools import MCPToolsManager
+from .multiagent_manager import MultiAgentManager, CoordinationStrategy, AgentType
 
 
 class RAGEngine:
@@ -105,6 +107,27 @@ class RAGEngine:
         if self.enable_mcp_tools:
             enabled_tools = mcp_tools_config.get("enabled_tools") if mcp_tools_config else None
             self.mcp_tools_manager = MCPToolsManager(enabled_tools=enabled_tools)
+        
+        # Multi-Agent Manager configuration
+        self.multiagent_manager = None
+        self._initialize_multiagent_manager()
+        
+    def _initialize_multiagent_manager(self):
+        """Initialize the multi-agent manager."""
+        try:
+            self.multiagent_manager = MultiAgentManager(
+                client=self.client,
+                model_name=self.model_name,
+                temperature=self.temperature,
+                max_tokens=1000,
+                embedding_service=self.embedding_service,
+                vector_store=self.vector_store,
+                mcp_tools_manager=self.mcp_tools_manager,
+                max_parallel_agents=3
+            )
+        except Exception as e:
+            # If multiagent initialization fails, continue without it
+            self.multiagent_manager = None
         
         # System prompt for the RAG assistant
         self.system_prompt = """You are a helpful AI assistant that answers questions based on the provided context documents. 
@@ -846,6 +869,235 @@ Always call the appropriate tool first, then provide a comprehensive response ba
             Stream of response chunks
         """
         yield from self.chat_stream(question, **kwargs)
+    
+    def chat_multiagent(
+        self,
+        message: str,
+        coordination_strategy: CoordinationStrategy = CoordinationStrategy.ADAPTIVE,
+        use_chat_history: bool = True,
+        agent_assignments: Optional[Dict[AgentType, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Chat using multiple agents working together.
+        
+        Args:
+            message: User message
+            coordination_strategy: How to coordinate multiple agents
+            use_chat_history: Whether to use chat history for context
+            agent_assignments: Manual agent assignments (optional)
+            
+        Returns:
+            Dictionary with response and multiagent metadata
+        """
+        if not self.multiagent_manager:
+            # Fallback to regular chat if multiagent is not available
+            return self.chat(message, include_context=True, use_chat_history=use_chat_history)
+        
+        try:
+            # Create multiagent task
+            task = self.multiagent_manager.create_task(
+                user_query=message,
+                coordination_strategy=coordination_strategy,
+                agent_assignments=agent_assignments
+            )
+            
+            # Add chat history context if enabled
+            if use_chat_history and self.chat_history:
+                task.context["chat_history"] = self.chat_history[-10:]  # Last 10 messages
+            
+            # Execute task
+            results = self.multiagent_manager.execute_task_sync(task)
+            
+            # Synthesize final response
+            final_response = self.multiagent_manager.synthesize_results(results, message)
+            
+            # Update chat history
+            if use_chat_history:
+                self.chat_history.append({"role": "user", "content": message})
+                self.chat_history.append({"role": "assistant", "content": final_response})
+                
+                # Keep chat history manageable
+                if len(self.chat_history) > 20:
+                    self.chat_history = self.chat_history[-20:]
+            
+            return {
+                "response": final_response,
+                "multiagent_results": [
+                    {
+                        "agent_id": r.agent_id,
+                        "agent_type": r.agent_type.value,
+                        "task": r.task,
+                        "result": r.result,
+                        "success": r.success,
+                        "execution_time": r.execution_time,
+                        "tools_used": r.tools_used,
+                        "error": r.error
+                    }
+                    for r in results
+                ],
+                "coordination_strategy": coordination_strategy.value,
+                "model_used": self.model_name,
+                "timestamp": datetime.now().isoformat(),
+                "endpoint_type": self._detect_endpoint_type()
+            }
+            
+        except Exception as e:
+            return {
+                "response": f"Error in multiagent processing: {str(e)}",
+                "multiagent_results": [],
+                "coordination_strategy": coordination_strategy.value,
+                "model_used": self.model_name,
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e),
+                "endpoint_type": self._detect_endpoint_type()
+            }
+    
+    def chat_multiagent_stream(
+        self,
+        message: str,
+        coordination_strategy: CoordinationStrategy = CoordinationStrategy.ADAPTIVE,
+        use_chat_history: bool = True,
+        agent_assignments: Optional[Dict[AgentType, str]] = None
+    ):
+        """
+        Chat using multiple agents with streaming updates.
+        
+        Args:
+            message: User message
+            coordination_strategy: How to coordinate multiple agents
+            use_chat_history: Whether to use chat history for context
+            agent_assignments: Manual agent assignments (optional)
+            
+        Yields:
+            Stream of progress updates and final response
+        """
+        if not self.multiagent_manager:
+            # Fallback to regular streaming chat
+            yield from self.chat_stream(message, include_context=True, use_chat_history=use_chat_history)
+            return
+        
+        try:
+            # Create multiagent task
+            task = self.multiagent_manager.create_task(
+                user_query=message,
+                coordination_strategy=coordination_strategy,
+                agent_assignments=agent_assignments
+            )
+            
+            # Add chat history context if enabled
+            if use_chat_history and self.chat_history:
+                task.context["chat_history"] = self.chat_history[-10:]
+            
+            yield f"🤖 **Multi-Agent Processing**: {coordination_strategy.value.title()} Strategy\n\n"
+            
+            # Show agent assignments
+            agent_stats = self.multiagent_manager.get_agent_stats()
+            yield f"📊 **Available Agents**: {', '.join(agent_stats['available_capabilities'])}\n\n"
+            
+            # Track agent outputs for final synthesis
+            agent_outputs = {}
+            current_agent = None
+            current_output = ""
+            
+            # Stream real-time execution
+            loop = None
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            async def process_stream():
+                nonlocal current_agent, current_output, agent_outputs
+                
+                async for update in self.multiagent_manager.execute_task_stream(task):
+                    if update["type"] == "progress":
+                        yield f"{update['message']}\n\n"
+                    
+                    elif update["type"] == "agent_content":
+                        agent_type = update["agent_type"]
+                        agent_icon = update["icon"]
+                        content = update["content"]
+                        
+                        # Show agent header if this is a new agent
+                        if current_agent != agent_type:
+                            if current_agent is not None:
+                                # Finish previous agent
+                                yield "\n\n---\n\n"
+                                agent_outputs[current_agent.value] = current_output
+                            
+                            current_agent = agent_type
+                            current_output = ""
+                            yield f"### {agent_icon} {agent_type.value.title()} Agent\n\n"
+                        
+                        # Stream agent content
+                        current_output += content
+                        yield content
+                    
+                    elif update["type"] == "agent_complete":
+                        agent_type = update["agent_type"]
+                        success = update["success"]
+                        
+                        if success:
+                            yield f"\n\n✅ **{agent_type.value.title()} Agent completed successfully**\n"
+                        else:
+                            yield f"\n\n❌ **{agent_type.value.title()} Agent failed**\n"
+                    
+                    elif update["type"] == "complete":
+                        # Store final output for last agent
+                        if current_agent is not None:
+                            agent_outputs[current_agent.value] = current_output
+                        
+                        yield "\n\n---\n\n"
+                        
+                        results = update["results"]
+                        
+                        # Synthesize final response
+                        yield "## 📝 Final Synthesized Response\n\n"
+                        final_response = self.multiagent_manager.synthesize_results(results, message)
+                        
+                        # Stream the final response
+                        words = final_response.split()
+                        for i, word in enumerate(words):
+                            yield word + " "
+                            if i % 10 == 0:  # Small pause for better UX
+                                await asyncio.sleep(0.01)
+                        
+                        # Update chat history
+                        if use_chat_history:
+                            self.chat_history.append({"role": "user", "content": message})
+                            self.chat_history.append({"role": "assistant", "content": final_response})
+                            
+                            # Keep chat history manageable
+                            if len(self.chat_history) > 20:
+                                self.chat_history = self.chat_history[-20:]
+            
+            # Execute the async stream in the event loop
+            async_gen = process_stream()
+            
+            while True:
+                try:
+                    chunk = loop.run_until_complete(async_gen.__anext__())
+                    yield chunk
+                except StopAsyncIteration:
+                    break
+                    
+        except Exception as e:
+            yield f"\n❌ **Error in multiagent processing**: {str(e)}\n"
+            yield "Falling back to regular chat mode...\n\n"
+            yield from self.chat_stream(message, include_context=True, use_chat_history=use_chat_history)
+    
+    def _get_agent_icon(self, agent_type: AgentType) -> str:
+        """Get icon for agent type."""
+        icons = {
+            AgentType.RESEARCH: "🔍",
+            AgentType.ANALYSIS: "📊",
+            AgentType.WRITING: "✍️",
+            AgentType.TOOL: "🔧",
+            AgentType.RAG: "📚",
+            AgentType.COORDINATOR: "🎯"
+        }
+        return icons.get(agent_type, "🤖")
     
     def clear_chat_history(self):
         """Clear the chat history."""

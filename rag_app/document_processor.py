@@ -8,7 +8,7 @@ text extraction, chunking, and preprocessing for various document types.
 import os
 import uuid
 import re
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 from datetime import datetime
 import hashlib

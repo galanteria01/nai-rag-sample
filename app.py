@@ -96,11 +96,15 @@ def initialize_session_state():
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'rag_enabled' not in st.session_state:
-        st.session_state.rag_enabled = True
+        st.session_state.rag_enabled = False
     if 'knowledge_base_loaded' not in st.session_state:
         st.session_state.knowledge_base_loaded = False
     if 'mcp_tools_enabled' not in st.session_state:
         st.session_state.mcp_tools_enabled = False
+    if 'multiagent_enabled' not in st.session_state:
+        st.session_state.multiagent_enabled = False
+    if 'coordination_strategy' not in st.session_state:
+        st.session_state.coordination_strategy = "adaptive"
     # Configuration state
     if 'config' not in st.session_state:
         st.session_state.config = get_current_configuration()
@@ -247,7 +251,7 @@ def sidebar_configuration():
     temperature = st.sidebar.slider(
         "Temperature",
         min_value=0.0,
-        max_value=2.0,
+        max_value=1.0,
         value=st.session_state.config.get("temperature", 0.7),
         step=0.1,
         help="Controls randomness in responses"
@@ -507,11 +511,10 @@ def sidebar_configuration():
         - Verify embedding dimensions match
         
         **MCP Tools Features:**
-        - **Web Search**: Real-time web information lookup
-        - **Runtime Logs**: Application monitoring and debugging
         - **File Operations**: Read and write files safely
         - **Code Execution**: Execute code snippets (placeholder)
         - **Memory Management**: Save and retrieve information
+        - **Database Query**: Execute SQL queries against a database
         
         **Need Help?**
         - Contact your Nutanix administrator
@@ -520,77 +523,145 @@ def sidebar_configuration():
         """)
 
 def rag_toggle_section():
-    """Create the RAG toggle section."""
-    # st.markdown('<div class="rag-toggle">', unsafe_allow_html=True)
+    """Create the chat mode selection section."""
+    st.subheader("🔧 Chat Mode Configuration")
     
-    col1, col2 = st.columns([3, 1])
+    # Chat mode selection
+    col1, col2, col3 = st.columns([2, 2, 2])
     
     with col1:
-        st.subheader("🔧 RAG Mode")
-        if st.session_state.rag_enabled:
-            st.write("**Enabled** - Chat with your documents using Retrieval-Augmented Generation")
-        else:
-            # Check if MCP tools are enabled
-            mcp_tools_enabled = (hasattr(st.session_state.rag_engine, 'enable_mcp_tools') and 
-                               st.session_state.rag_engine.enable_mcp_tools if st.session_state.rag_engine else False)
-            
-            if mcp_tools_enabled:
-                st.write("**Disabled** - Direct chat with the language model enhanced by MCP tools")
-                
-                # Show enabled tools
-                if st.session_state.rag_engine and st.session_state.rag_engine.mcp_tools_manager:
-                    available_tools = st.session_state.rag_engine.mcp_tools_manager.get_available_tools()
-                    st.write(f"🔧 **Active Tools:** {', '.join(available_tools)}")
-            else:
-                st.write("**Disabled** - Direct chat with the language model")
+        rag_enabled = st.toggle("📚 RAG Mode", value=st.session_state.rag_enabled)
+        if rag_enabled:
+            st.caption("Chat with your documents using retrieval")
     
     with col2:
-        rag_enabled = st.toggle("Enable RAG", value=st.session_state.rag_enabled)
-        if rag_enabled != st.session_state.rag_enabled:
-            st.session_state.rag_enabled = rag_enabled
-            
-            # Auto-initialize system when RAG mode changes
-            config = st.session_state.config
-            if config["nutanix_api_key"] and config["nutanix_endpoint"]:
-                with st.spinner("Reinitializing system with new RAG mode..."):
-                    # Configure MCP tools based on RAG mode
-                    if rag_enabled:
-                        # RAG mode - disable MCP tools
-                        enable_mcp_tools = False
-                        mcp_tools_config = {}
-                    else:
-                        # Direct chat mode - enable MCP tools
-                        enable_mcp_tools = True
-                        mcp_tools_config = {
-                            "enabled_tools": ["file_operations", "code_execution", "memory_management", "database_query"]
-                        }
-                    
-                    result = initialize_rag_system(
-                        nutanix_api_key=config["nutanix_api_key"],
-                        nutanix_endpoint=config["nutanix_endpoint"],
-                        embedding_model=config["embedding_model"],
-                        chat_model=config["chat_model"],
-                        embedding_dimension=config["embedding_dimension"],
-                        temperature=config["temperature"],
-                        max_retrieved_docs=config["max_retrieved_docs"],
-                        chunk_size=config["chunk_size"],
-                        chunk_overlap=config["chunk_overlap"],
-                        chunking_strategy=config["chunking_strategy"],
-                        index_type=config["index_type"],
-                        enable_mcp_tools=enable_mcp_tools,
-                        mcp_tools_config=mcp_tools_config
-                    )
-                    
-                    if result["success"]:
-                        st.success(f"✅ {result['message']}")
-                    else:
-                        st.error(f"❌ {result['message']}")
-            else:
-                st.warning("⚠️ Please configure API key and endpoint in the sidebar first")
-            
-            st.rerun()
+        multiagent_enabled = st.toggle("🤖 Multi-Agent Mode", value=st.session_state.multiagent_enabled)
+        if multiagent_enabled:
+            st.caption("Multiple AI agents collaborate on your query")
     
-    st.markdown('</div>', unsafe_allow_html=True)
+    with col3:
+        # Show current active mode
+        if st.session_state.rag_enabled and st.session_state.multiagent_enabled:
+            st.info("📚🤖 **RAG + Multi-Agent**")
+        elif st.session_state.rag_enabled:
+            st.info("📚 **RAG Only**")
+        elif st.session_state.multiagent_enabled:
+            st.info("🤖 **Multi-Agent Only**")
+        else:
+            # Check for MCP tools
+            mcp_tools_enabled = (hasattr(st.session_state.rag_engine, 'enable_mcp_tools') and 
+                               st.session_state.rag_engine.enable_mcp_tools if st.session_state.rag_engine else False)
+            if mcp_tools_enabled:
+                st.info("🔧 **Tools Enhanced**")
+            else:
+                st.info("💬 **Direct Chat**")
+    
+    # Multi-agent configuration
+    if multiagent_enabled:
+        st.markdown("### 🎯 Multi-Agent Configuration")
+        
+        col_strategy, col_info = st.columns([1, 2])
+        
+        with col_strategy:
+            coordination_strategy = st.selectbox(
+                "Coordination Strategy",
+                options=["adaptive", "parallel", "sequential", "collaborative"],
+                index=["adaptive", "parallel", "sequential", "collaborative"].index(st.session_state.coordination_strategy),
+                help="How agents should work together"
+            )
+        
+        with col_info:
+            strategy_descriptions = {
+                "adaptive": "🧠 **Adaptive**: System automatically chooses the best strategy based on query complexity",
+                "parallel": "⚡ **Parallel**: All agents work simultaneously for faster responses",
+                "sequential": "🔄 **Sequential**: Agents work in order, each building on previous results",
+                "collaborative": "🤝 **Collaborative**: Multiple rounds of agent interaction and refinement"
+            }
+            st.markdown(strategy_descriptions[coordination_strategy])
+        
+        st.session_state.coordination_strategy = coordination_strategy
+        
+        # Show available agents
+        if st.session_state.rag_engine and hasattr(st.session_state.rag_engine, 'multiagent_manager') and st.session_state.rag_engine.multiagent_manager:
+            agent_stats = st.session_state.rag_engine.multiagent_manager.get_agent_stats()
+            
+            st.markdown("**🎭 Available Agents:**")
+            agent_cols = st.columns(len(agent_stats["agents_by_type"]))
+            
+            for i, (agent_type, count) in enumerate(agent_stats["agents_by_type"].items()):
+                with agent_cols[i]:
+                    agent_icons = {
+                        "research": "🔍",
+                        "analysis": "📊", 
+                        "writing": "✍️",
+                        "tool": "🔧",
+                        "rag": "📚",
+                        "coordinator": "🎯"
+                    }
+                    icon = agent_icons.get(agent_type, "🤖")
+                    st.metric(f"{icon} {agent_type.title()}", count)
+    
+    # Handle mode changes
+    mode_changed = False
+    
+    if rag_enabled != st.session_state.rag_enabled:
+        st.session_state.rag_enabled = rag_enabled
+        mode_changed = True
+    
+    if multiagent_enabled != st.session_state.multiagent_enabled:
+        st.session_state.multiagent_enabled = multiagent_enabled
+        mode_changed = True
+    
+    # Auto-reinitialize system when modes change
+    if mode_changed:
+        config = st.session_state.config
+        if config["nutanix_api_key"] and config["nutanix_endpoint"]:
+            with st.spinner("Reinitializing system with new chat modes..."):
+                # Configure MCP tools based on modes
+                if rag_enabled or multiagent_enabled:
+                    # RAG or multiagent mode - enable MCP tools for enhanced capabilities
+                    enable_mcp_tools = True
+                    mcp_tools_config = {
+                        "enabled_tools": ["file_operations", "code_execution", "memory_management", "database_query"]
+                    }
+                else:
+                    # Direct chat mode - enable MCP tools
+                    enable_mcp_tools = True
+                    mcp_tools_config = {
+                        "enabled_tools": ["file_operations", "code_execution", "memory_management", "database_query"]
+                    }
+                
+                result = initialize_rag_system(
+                    nutanix_api_key=config["nutanix_api_key"],
+                    nutanix_endpoint=config["nutanix_endpoint"],
+                    embedding_model=config["embedding_model"],
+                    chat_model=config["chat_model"],
+                    embedding_dimension=config["embedding_dimension"],
+                    temperature=config["temperature"],
+                    max_retrieved_docs=config["max_retrieved_docs"],
+                    chunk_size=config["chunk_size"],
+                    chunk_overlap=config["chunk_overlap"],
+                    chunking_strategy=config["chunking_strategy"],
+                    index_type=config["index_type"],
+                    enable_mcp_tools=enable_mcp_tools,
+                    mcp_tools_config=mcp_tools_config
+                )
+                
+                if result["success"]:
+                    st.success(f"✅ {result['message']}")
+                    
+                    # Show multiagent status
+                    if multiagent_enabled and st.session_state.rag_engine:
+                        if hasattr(st.session_state.rag_engine, 'multiagent_manager') and st.session_state.rag_engine.multiagent_manager:
+                            st.success("🤖 Multi-agent system initialized!")
+                        else:
+                            st.warning("⚠️ Multi-agent system failed to initialize, falling back to single agent")
+                else:
+                    st.error(f"❌ {result['message']}")
+        else:
+            st.warning("⚠️ Please configure API key and endpoint in the sidebar first")
+        
+        st.rerun()
 
 def file_upload_section():
     """Create the file upload section for RAG mode."""
@@ -711,7 +782,17 @@ def chat_interface():
     col1, col2 = st.columns([4, 1])
     
     with col1:
-        if st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
+        if st.session_state.rag_enabled and st.session_state.multiagent_enabled:
+            if st.session_state.knowledge_base_loaded:
+                st.markdown("#### 🤖📚 Multi-Agent RAG Chat")
+                st.info("🔍🤖 **Multi-Agent RAG Mode** - Multiple AI agents will collaborate using your documents")
+            else:
+                st.markdown("#### 🤖📚 Multi-Agent RAG Chat")
+                st.warning("📄 **Upload documents** to enable full multi-agent RAG capabilities")
+        elif st.session_state.multiagent_enabled:
+            st.markdown("#### 🤖 Multi-Agent Chat")
+            st.info("🤖 **Multi-Agent Mode** - Multiple specialized AI agents will collaborate on your query")
+        elif st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
             st.markdown("#### 💬 Chat with Your Documents")
             st.info("🔍 **RAG Mode Active** - Your questions will be answered using uploaded documents")
         elif st.session_state.rag_enabled and not st.session_state.knowledge_base_loaded:
@@ -737,7 +818,30 @@ def chat_interface():
             st.markdown("---")
             st.markdown("**💡 Start a conversation by typing your question below**")
             
-            if st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
+            if st.session_state.multiagent_enabled:
+                st.markdown("**🤖 Multi-Agent Examples - Try complex queries:**")
+                if st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
+                    st.markdown("- Compare and analyze information from multiple documents")
+                    st.markdown("- Research a topic and provide comprehensive analysis")
+                    st.markdown("- Synthesize information and create detailed reports")
+                else:
+                    st.markdown("- Research emerging technologies and analyze trends")
+                    st.markdown("- Compare pros and cons of different approaches")
+                    st.markdown("- Create comprehensive analysis reports")
+                st.markdown("- Analyze data and provide insights with visualizations")
+                st.markdown("- Execute complex multi-step research tasks")
+                
+                # Show coordination strategy info
+                strategy_info = {
+                    "adaptive": "🧠 Agents adapt strategy based on query complexity",
+                    "parallel": "⚡ All agents work simultaneously for speed",
+                    "sequential": "🔄 Agents build on each other's work step-by-step", 
+                    "collaborative": "🤝 Multiple rounds of agent collaboration"
+                }
+                current_strategy = st.session_state.coordination_strategy
+                st.caption(f"Current strategy: {strategy_info.get(current_strategy, '')}")
+                
+            elif st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
                 st.markdown("**Try asking about your uploaded documents:**")
                 st.markdown("- What are the main topics in the documents?")
                 st.markdown("- Summarize the key points")
@@ -749,11 +853,10 @@ def chat_interface():
                 
                 if mcp_tools_enabled:
                     st.markdown("**Ask me anything - I have enhanced capabilities:**")
-                    st.markdown("- 🌐 Web search for real-time information")
-                    st.markdown("- 📊 Runtime logs and error checking")
                     st.markdown("- 📁 File operations (read/write)")
                     st.markdown("- 💻 Code execution assistance")
                     st.markdown("- 🧠 Memory management")
+                    st.markdown("- 📊 Database query")
                     st.markdown("- General questions and discussions")
                 else:
                     st.markdown("**Ask me anything:**")
@@ -772,7 +875,27 @@ def chat_interface():
         # Generate and display assistant response with streaming
         with st.chat_message("assistant"):
             try:
-                if st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
+                # Determine which mode to use based on current settings
+                if st.session_state.multiagent_enabled:
+                    # Multi-agent mode
+                    from rag_app.multiagent_manager import CoordinationStrategy
+                    
+                    # Map string strategy to enum
+                    strategy_map = {
+                        "adaptive": CoordinationStrategy.ADAPTIVE,
+                        "parallel": CoordinationStrategy.PARALLEL,
+                        "sequential": CoordinationStrategy.SEQUENTIAL,
+                        "collaborative": CoordinationStrategy.COLLABORATIVE
+                    }
+                    
+                    coordination_strategy = strategy_map.get(st.session_state.coordination_strategy, CoordinationStrategy.ADAPTIVE)
+                    
+                    # Use multiagent streaming
+                    response_stream = st.session_state.rag_engine.chat_multiagent_stream(
+                        prompt, 
+                        coordination_strategy=coordination_strategy
+                    )
+                elif st.session_state.rag_enabled and st.session_state.knowledge_base_loaded:
                     # Use RAG with streaming
                     response_stream = st.session_state.rag_engine.ask_stream(prompt)
                 else:
@@ -878,26 +1001,33 @@ def main():
         # RAG Toggle Section
         rag_toggle_section()
         
-        # Show appropriate interface based on RAG mode
+        # Show appropriate interface based on current modes
         if st.session_state.rag_enabled:
             # For RAG mode, show file upload in an expander at the top
             with st.expander("📁 Knowledge Base Management", expanded=not st.session_state.knowledge_base_loaded):
                 file_upload_section()
             
-            # Chat interface takes full width
-            if st.session_state.knowledge_base_loaded:
+            # Chat interface - works with both single agent and multiagent
+            if st.session_state.knowledge_base_loaded or st.session_state.multiagent_enabled:
                 chat_interface()
             else:
-                st.info("📄 Please add documents to your knowledge base to start RAG-based chat")
-                
-                # Show sample questions
-                st.subheader("❓ Sample Questions")
-                st.markdown("""
-                Once you add documents, you can ask questions like:
-                - "What is Nutanix Enterprise AI?"
-                - "What are the key features?"
-                - "How does it support AI workloads?"
-                """)
+                if st.session_state.multiagent_enabled:
+                    st.info("🤖 Multi-agent mode is active! You can chat without documents or add documents for enhanced RAG capabilities.")
+                    chat_interface()
+                else:
+                    st.info("📄 Please add documents to your knowledge base to start RAG-based chat")
+                    
+                    # Show sample questions
+                    st.subheader("❓ Sample Questions")
+                    st.markdown("""
+                    Once you add documents, you can ask questions like:
+                    - "What is Nutanix Enterprise AI?"
+                    - "What are the key features?"
+                    - "How does it support AI workloads?"
+                    """)
+        elif st.session_state.multiagent_enabled:
+            # Multi-agent mode without RAG
+            chat_interface()
         else:
             # Direct chat mode
             chat_interface()

@@ -293,7 +293,6 @@ class EmbeddingService:
     def _detect_endpoint_type(self) -> str:
         """Detect the type of endpoint based on base URL."""
         
-
         return "Nutanix Enterprise AI"
 
     

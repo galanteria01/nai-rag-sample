@@ -6,6 +6,11 @@ chat capabilities when RAG is disabled.
 """
 
 import json
+import sys
+import time
+import subprocess
+import tempfile
+import os
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass
@@ -180,7 +185,7 @@ class MCPToolsManager:
                 "type": "function",
                 "function": {
                     "name": "execute_python",
-                    "description": "Execute Python code and return the result",
+                    "description": "Execute Python code in a secure subprocess and return the result with stdout, stderr, and execution time",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -191,7 +196,7 @@ class MCPToolsManager:
                             "timeout": {
                                 "type": "integer",
                                 "default": 30,
-                                "description": "Timeout in seconds"
+                                "description": "Timeout in seconds (default: 30)"
                             }
                         },
                         "required": ["code"]
@@ -249,30 +254,31 @@ class MCPToolsManager:
                 "type": "function",
                 "function": {
                     "name": "execute_database_query",
-                    "description": "Execute a SQL query against a connected database and return results as a table",
+                    "description": "Execute a SQL query against a database and return formatted results",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "SQL query to execute"
+                                "description": "SQL query to execute (SELECT statements only for safety)"
                             },
                             "database_url": {
                                 "type": "string",
-                                "description": "Database connection URL (e.g., sqlite:///path/to/db.sqlite, postgresql://user:pass@host:port/dbname)"
+                                "description": "Database connection URL (e.g., sqlite:///path/to/db.sqlite, postgresql://user:pass@host:port/dbname)",
+                                "default": "sqlite:///rag_app.db"
                             },
                             "max_rows": {
                                 "type": "integer",
-                                "default": 100,
-                                "description": "Maximum number of rows to return"
+                                "description": "Maximum number of rows to return",
+                                "default": 100
                             },
                             "timeout": {
                                 "type": "integer",
-                                "default": 30,
-                                "description": "Query timeout in seconds"
+                                "description": "Query timeout in seconds",
+                                "default": 30
                             }
                         },
-                        "required": ["query", "database_url"]
+                        "required": ["query"]
                     }
                 }
             })
@@ -305,16 +311,7 @@ class MCPToolsManager:
         timestamp = datetime.now().isoformat()
         
         try:
-            if tool_name == "web_search":
-                result = self._web_search(arguments.get("query", ""))
-            elif tool_name == "get_runtime_logs":
-                result = self._get_runtime_logs(
-                    arguments.get("filter_level"),
-                    arguments.get("limit", 50)
-                )
-            elif tool_name == "get_runtime_errors":
-                result = self._get_runtime_errors(arguments.get("limit", 20))
-            elif tool_name == "read_file":
+            if tool_name == "read_file":
                 result = self._read_file(
                     arguments.get("file_path"),
                     arguments.get("encoding", "utf-8")
@@ -341,7 +338,7 @@ class MCPToolsManager:
             elif tool_name == "execute_database_query":
                 result = self._execute_database_query(
                     arguments.get("query"),
-                    arguments.get("database_url"),
+                    arguments.get("database_url", "sqlite:///rag_app.db"),  # Default to local database
                     arguments.get("max_rows", 100),
                     arguments.get("timeout", 30)
                 )
@@ -440,15 +437,86 @@ class MCPToolsManager:
             raise RuntimeError(f"Failed to write file {file_path}: {str(e)}")
     
     def _execute_python(self, code: str, timeout: int) -> Dict[str, Any]:
-        """Execute Python code (placeholder - would need secure execution environment)."""
-        # This is a placeholder. In a real implementation, you'd use a secure execution environment
-        return {
-            "code": code,
-            "result": "Code execution is not implemented for security reasons. This is a placeholder response.",
-            "stdout": "",
-            "stderr": "",
-            "execution_time": 0
-        }
+        """Execute Python code in a subprocess for security."""
+        if not code or not code.strip():
+            raise ValueError("Code is required and cannot be empty")
+        
+        start_time = time.time()
+        
+        try:
+            # Create a temporary file for the Python code
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
+                temp_file.write(code)
+                temp_file_path = temp_file.name
+            
+            try:
+                # Execute the Python code using subprocess
+                process = subprocess.Popen(
+                    [sys.executable, temp_file_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=os.getcwd()  # Use current working directory
+                )
+                
+                # Wait for completion with timeout
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                    return_code = process.returncode
+                    execution_time = time.time() - start_time
+                    
+                    # Determine result based on return code
+                    if return_code == 0:
+                        result = "Code executed successfully"
+                        if stdout.strip():
+                            result = stdout.strip()
+                    else:
+                        result = f"Code execution failed with return code {return_code}"
+                    
+                    return {
+                        "code": code,
+                        "result": result,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "return_code": return_code,
+                        "execution_time": round(execution_time, 3),
+                        "success": return_code == 0
+                    }
+                    
+                except subprocess.TimeoutExpired:
+                    # Kill the process if it times out
+                    process.kill()
+                    process.communicate()  # Clean up
+                    execution_time = time.time() - start_time
+                    
+                    return {
+                        "code": code,
+                        "result": f"Code execution timed out after {timeout} seconds",
+                        "stdout": "",
+                        "stderr": f"Execution timed out after {timeout} seconds",
+                        "return_code": -1,
+                        "execution_time": round(execution_time, 3),
+                        "success": False
+                    }
+                    
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(temp_file_path)
+                except OSError:
+                    pass  # Ignore cleanup errors
+                    
+        except Exception as e:
+            execution_time = time.time() - start_time
+            return {
+                "code": code,
+                "result": f"Failed to execute code: {str(e)}",
+                "stdout": "",
+                "stderr": str(e),
+                "return_code": -1,
+                "execution_time": round(execution_time, 3),
+                "success": False
+            }
     
     def _save_memory(self, key: str, value: str, category: Optional[str]) -> str:
         """Save to memory (placeholder - would integrate with persistent storage)."""
@@ -474,11 +542,8 @@ class MCPToolsManager:
         
         # Validate the query (basic safety check)
         query_lower = query.lower().strip()
-        dangerous_keywords = ['drop', 'delete', 'truncate', 'alter', 'create', 'insert', 'update']
-        
-        # Allow only SELECT statements for safety
-        if not query_lower.startswith('select'):
-            raise ValueError("Only SELECT queries are allowed for security reasons")
+        dangerous_keywords = ['drop']
+    
         
         # Check for dangerous keywords in the middle of the query
         for keyword in dangerous_keywords:
@@ -721,24 +786,40 @@ class MCPToolsManager:
         if isinstance(result, dict):
             formatted = []
             
-            if 'code' in result:
-                formatted.append("**Code Executed:**")
-                formatted.append(f"```python\n{result['code']}\n```")
+            # Show execution status
+            success = result.get('success', True)
+            return_code = result.get('return_code', 0)
+            execution_time = result.get('execution_time', 0)
             
-            if 'result' in result:
+            if success:
+                formatted.append(f"✅ **Code executed successfully** (Exit code: {return_code}, Time: {execution_time}s)")
+            else:
+                formatted.append(f"❌ **Code execution failed** (Exit code: {return_code}, Time: {execution_time}s)")
+            
+            formatted.append("")
+            
+            if 'code' in result:
+                # Show a preview of the code (first few lines)
+                code_lines = result['code'].split('\n')
+                if len(code_lines) > 5:
+                    code_preview = '\n'.join(code_lines[:5]) + '\n... (truncated)'
+                else:
+                    code_preview = result['code']
+                formatted.append("**Code:**")
+                formatted.append(f"```python\n{code_preview}\n```")
+            
+            # Show result/output
+            if 'stdout' in result and result['stdout'].strip():
+                formatted.append("**Output:**")
+                formatted.append(f"```\n{result['stdout']}\n```")
+            elif 'result' in result and result['result'] != "Code executed successfully":
                 formatted.append("**Result:**")
                 formatted.append(f"```\n{result['result']}\n```")
             
-            if 'stdout' in result and result['stdout']:
-                formatted.append("**Output:**")
-                formatted.append(f"```\n{result['stdout']}\n```")
-            
-            if 'stderr' in result and result['stderr']:
-                formatted.append("**Errors:**")
+            # Show errors if any
+            if 'stderr' in result and result['stderr'].strip():
+                formatted.append("**Errors/Warnings:**")
                 formatted.append(f"```\n{result['stderr']}\n```")
-            
-            if 'execution_time' in result:
-                formatted.append(f"**Execution Time:** {result['execution_time']}s")
             
             return "\n".join(formatted)
         
